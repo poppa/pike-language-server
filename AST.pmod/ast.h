@@ -1,7 +1,7 @@
 #ifndef AST_H
 #define AST_H
 
-#define TODO(what) error(what)
+#define TODO(what...) error("TODO: " + sprintf(what))
 
 #ifdef AST_DEBUG
 # define ASSERT_DEBUG(what, msg) if (!(what)) error(msg)

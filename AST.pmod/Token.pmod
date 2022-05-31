@@ -33,7 +33,7 @@ enum Type {
   FOR,                                    // for
   FOREACH,                                // foreach
   FUNCTION_ID,                            // function
-  FUNCTION_NAME,                          // __func__
+  FUNCTION_NAME,                          // __func__ FIXME: __FUNCTION__???
   GAUGE,                                  // gauge
   GE,                                     // >=
   GLOBAL,                                 // global
@@ -88,6 +88,7 @@ enum Type {
   SWITCH,                                 // switch
   TYPEDEF,                                // typedef
   TYPEOF,                                 // typeof
+  UNKNOWN,                                // __unknown__
   UNUSED,                                 // __unused__
   VARIANT,                                // variant
   VERSION,                                // version prefix
@@ -101,13 +102,17 @@ enum Type {
   ARRAY_END,                              // })
   ARRAY_START,                            // ({
   ASSIGN,                                 // =
+  AT,                                     // @
   BLOCK_COMMENT,                          // /*
   BRACKET_LEFT,                           // [
   BRACKET_RIGHT,                          // ]
+  CHAR,                                   // character literal
   COLON,                                  // :
+  COMMA,                                  // ,
   COMMENT,                                // //
   CURLY_LEFT,                             // {
   CURLY_RIGHT,                            // }
+  DIV,                                    // /
   DOC_COMMENT,                            // //!
   DOT,                                    // .
   GREATER_THAN,                           // >
@@ -115,12 +120,16 @@ enum Type {
   MAPPING_END,                            // ])
   MAPPING_START,                          // ([
   MINUS,                                  // -
+  MOD,                                    // %
+  MULT,                                   // *
   PAREN_LEFT,                             // (
   PAREN_RIGHT,                            // )
   PIPE,                                   // |
   PLUS,                                   // +
+  QUESTION,                               // ?
+  SEMICOLON,                              // ;
+  TILDE,                                  // ~
   XOR,                                    // ^
-  MULT,                                   // *
 }
 
 class Position(
