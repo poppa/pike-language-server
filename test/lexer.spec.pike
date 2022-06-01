@@ -706,6 +706,21 @@ describe("Identifiers and keywords", lambda () {
     expect(tok->type)->to_equal(WHILE);
     expect(tok->value)->to_equal("while");
   });
+
+  test("It should be at next position after lexing keyword", lambda () {
+    Lexer lexer = Lexer("array()");
+    Token tok = lexer->lex();
+    expect(tok->type)->to_equal(ARRAY_ID);
+    expect(tok->value)->to_equal("array");
+
+    tok = lexer->lex();
+    expect(tok->value)->to_equal("(");
+    expect(tok->type)->to_equal(PAREN_LEFT);
+
+    tok = lexer->lex();
+    expect(tok->type)->to_equal(PAREN_RIGHT);
+    expect(tok->value)->to_equal(")");
+  });
 });
 
 /*******************************************************************************
@@ -1168,6 +1183,118 @@ describe("Symbol names", lambda () {
   test("It should lex a simple symbol", lambda () {
     Lexer lexer = Lexer("my_symbol");
     Token t = lexer->lex();
+    expect(t->type)->to_equal(SYMBOL_NAME);
+    expect(t->value)->to_equal("my_symbol");
+  });
+
+  test("It should lex a simple symbol with leading underscore", lambda () {
+    Lexer lexer = Lexer("_my_symbol");
+    Token t = lexer->lex();
+    expect(t->type)->to_equal(SYMBOL_NAME);
+    expect(t->value)->to_equal("_my_symbol");
+  });
+
+  test("It should lex a simple symbol with leading dunderscore", lambda () {
+    Lexer lexer = Lexer("__my_symbol");
+    Token t = lexer->lex();
+    expect(t->type)->to_equal(SYMBOL_NAME);
+    expect(t->value)->to_equal("__my_symbol");
+  });
+
+  test("It should throw on leading and tailing dunderscore", lambda () {
+    Lexer lexer = Lexer("__my_symbol__");
+    expect(lambda () { lexer->lex(); })->to_throw(
+      "Symbols with leading and tailing double underscores are reserved\n"
+    );
+  });
+});
+
+/*******************************************************************************
+
+  More complex stuff
+
+*******************************************************************************/
+describe("More complex stuff", lambda () {
+  test("It should do its one-line complex thing", lambda () {
+    string code = #"array(string) name = ({ \"Pike\" });";
+    Lexer lexer = Lexer(code);
+    array(object(Token)) tokens = ({});
+
+    while (Token t = lexer->lex()) {
+      tokens += ({ t });
+    }
+
+    expect(sizeof(tokens))->to_equal(10);
+    expect(tokens[0]->type)->to_equal(ARRAY_ID);
+    expect(tokens[1]->type)->to_equal(PAREN_LEFT);
+    expect(tokens[2]->type)->to_equal(STRING_ID);
+    expect(tokens[3]->type)->to_equal(PAREN_RIGHT);
+    expect(tokens[4]->type)->to_equal(SYMBOL_NAME);
+    expect(tokens[5]->type)->to_equal(ASSIGN);
+    expect(tokens[6]->type)->to_equal(ARRAY_START);
+    expect(tokens[7]->type)->to_equal(STRING);
+    expect(tokens[8]->type)->to_equal(ARRAY_END);
+    expect(tokens[9]->type)->to_equal(SEMICOLON);
+  });
+
+  test("It should do its multi-line complex thing", lambda () {
+    string code = #"
+      class MyClass {
+        inherit Stdio.File;
+
+        protected float query(object in) {
+          return 1.0;
+        }
+      }";
+
+    Lexer lexer = Lexer(code);
+    array(object(Token)) tokens = ({});
+
+    while (Token t = lexer->lex()) {
+      tokens += ({ t });
+    }
+
+    expect(sizeof(tokens))->to_equal(21);
+
+    expect(tokens[0]->type)->to_equal(CLASS);        // class
+    expect(tokens[1]->type)->to_equal(SYMBOL_NAME);  // MyClass
+    expect(tokens[2]->type)->to_equal(CURLY_LEFT);   // {
+    expect(tokens[3]->type)->to_equal(INHERIT);      // inherit
+    expect(tokens[4]->type)->to_equal(SYMBOL_NAME);  // Stdion
+    expect(tokens[5]->type)->to_equal(DOT);          // .
+    expect(tokens[6]->type)->to_equal(SYMBOL_NAME);  // File
+    expect(tokens[7]->type)->to_equal(SEMICOLON);    // ;
+    expect(tokens[8]->type)->to_equal(PROTECTED);    // protected
+    expect(tokens[9]->type)->to_equal(FLOAT_ID);     // float
+    expect(tokens[10]->type)->to_equal(SYMBOL_NAME); // query
+    expect(tokens[11]->type)->to_equal(PAREN_LEFT);  // (
+    expect(tokens[12]->type)->to_equal(OBJECT_ID);   // object
+    expect(tokens[13]->type)->to_equal(SYMBOL_NAME); // in
+    expect(tokens[14]->type)->to_equal(PAREN_RIGHT); // )
+    expect(tokens[15]->type)->to_equal(CURLY_LEFT);  // {
+    expect(tokens[16]->type)->to_equal(RETURN);      // return
+    expect(tokens[17]->type)->to_equal(FLOAT);       // 1.0
+    expect(tokens[18]->type)->to_equal(SEMICOLON);   // ;
+    expect(tokens[19]->type)->to_equal(CURLY_RIGHT); // }
+    expect(tokens[20]->type)->to_equal(CURLY_RIGHT); // }
+
+    // First curly left
+    expect((mapping)tokens[2]->location->start)
+      ->to_equal(([ "byte": 21, "column": 21, "line": 2 ]));
+    expect((mapping)tokens[2]->location->end)
+      ->to_equal(([ "byte": 22, "column": 22, "line": 2 ]));
+
+    // File
+    expect((mapping)tokens[6]->location->start)
+      ->to_equal(([ "byte": 45, "column": 23, "line": 3 ]));
+    expect((mapping)tokens[6]->location->end)
+      ->to_equal(([ "byte": 49, "column": 27, "line": 3 ]));
+
+    // Semicolon after 1.0
+    expect((mapping)tokens[18]->location->start)
+      ->to_equal(([ "byte": 115, "column": 21, "line": 6 ]));
+    expect((mapping)tokens[18]->location->end)
+      ->to_equal(([ "byte": 116, "column": 22, "line": 6 ]));
   });
 });
 
