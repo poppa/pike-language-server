@@ -128,6 +128,7 @@ enum Type {
   PLUS,                                   // +
   QUESTION,                               // ?
   SEMICOLON,                              // ;
+  SYMBOL_NAME,                            // symbol name
   TILDE,                                  // ~
   XOR,                                    // ^
 }
@@ -139,15 +140,8 @@ class Position(
 ) {
   protected mixed cast(string how) {
     switch (how) {
-      case "mapping":
-        return ([
-          "byte": byte,
-          "line": line,
-          "column": column
-        ]);
-
-      default:
-        error("Can't cast %O to %O\n", object_program(this), how);
+      case "mapping": return ([ "byte": byte, "line": line, "column": column ]);
+      default: error("Can't cast %O to %O\n", object_program(this), how);
     }
   }
 
@@ -176,8 +170,7 @@ class Location(
           "end": (mapping) end
         ]);
 
-      default:
-        error("Can't cast %O to %O\n", object_program(this), how);
+      default: error("Can't cast %O to %O\n", object_program(this), how);
     }
   }
 
@@ -206,8 +199,7 @@ class Token(
           "value": value
         ]);
 
-      default:
-        error("Can't cast %O to %O\n", object_program(this), how);
+      default: error("Can't cast %O to %O\n", object_program(this), how);
     }
   }
 

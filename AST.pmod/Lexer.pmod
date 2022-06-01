@@ -50,7 +50,8 @@ protected class BaseLexer {
     }
   }
 
-  //! Creates a one character token
+  //! Creates a token with @[current] as value, @[position_start] as start
+  //! location and the current position as end location.
   public .Token.Token make_simple_token(.Token.Type type) {
     if (!current) {
       return UNDEFINED;
@@ -72,14 +73,13 @@ protected class BaseLexer {
     return p > 0 ? p - 1 : p;
   }
 
-  protected BaseLexer set_start_position() {
+  protected void set_start_position() {
     position_start = .Token.Position(at_byte, line, column);
-    return this;
   }
 
   protected string consume(int n) {
     string value = source->read(n);
-    column += n;
+    column += sizeof(value);
 
     if (value == "") {
       return UNDEFINED;
@@ -94,6 +94,7 @@ protected class BaseLexer {
       if (len > 1) {
         column = strlen(lines[-1]);
       } else {
+        TODO("// FIXME: This feels wroooong\n");
         // FIXME: This feels wroooong
         column = strlen(value);
       }
@@ -136,35 +137,28 @@ protected class BaseLexer {
     source->seek(-1, Stdio.SEEK_CUR);
   }
 
-  protected BaseLexer inc_line() {
+  protected void inc_line() {
     line += 1;
     column = 0;
-    return this;
   }
 
-  protected BaseLexer eat_whitespace() {
+  protected void eat_whitespace() {
     while ((< " ", "\t", "\v" >)[current]) {
       advance();
     }
-
-    return this;
   }
 
-  protected BaseLexer eat_whitespace_and_newline() {
+  protected void eat_whitespace_and_newline() {
     while ((< " ", "\t", "\v", "\n" >)[current]) {
       advance();
     }
-
-    return this;
   }
 
-  protected BaseLexer eat_newline() {
+  protected void eat_newline() {
     while (current == "\n") {
       inc_line();
       advance();
     }
-
-    return this;
   }
 
   protected string peek_source(int n) {
@@ -183,14 +177,6 @@ protected class BaseLexer {
 
   protected variant string peek_source() {
     return peek_source(1);
-  }
-
-  protected int peek_source_char(int n) {
-    return peek_source(n)[0];
-  }
-
-  protected variant int peek_source_char() {
-    return peek_source_char(1);
   }
 
   protected string concat(int n) {
@@ -212,23 +198,20 @@ protected class BaseLexer {
   protected bool read_word(string word) {
     int len = sizeof(word);
     int pos = source->tell();
-    source->seek(pos - 1, Stdio.SEEK_SET);
+    int col_in = column;
+    simple_put_back();
 
     String.Buffer buf = String.Buffer();
     function add = buf->add;
 
-    loop: while (string s = source->read(1)) {
-      if (s == "") {
-        break;
-      }
-
+    loop: while (string s = consume()) {
       int c = s[0];
       switch (c) {
         case '_':
+        case '0'..'9':
         // FIXME: Add support for ISO-8859-* and what not
         case 'a'..'z':
         case 'A'..'Z':
-        case '0'..'9':
           add(s);
           break;
 
@@ -240,29 +223,26 @@ protected class BaseLexer {
     string w = buf->get();
 
     if (w != word) {
+      column = col_in;
       source->seek(pos, Stdio.SEEK_SET);
       return false;
     }
 
     current = w;
-    column += sizeof(w) - 1;
 
     return true;
   }
 
   protected array low_read_word() {
     string old_current = current;
-    int pos = source->tell();
-    source->seek(-1, Stdio.SEEK_CUR);
+    int old_column = column;
+    int old_pos = source->tell();
+    simple_put_back();
 
     String.Buffer buf = String.Buffer();
     function add = buf->add;
 
-    loop: while (string s = source->read(1)) {
-      if (s == "") {
-        break;
-      }
-
+    loop: while (string s = read_non_ws()) {
       int c = s[0];
       switch (c) {
         case '_':
@@ -274,22 +254,21 @@ protected class BaseLexer {
           break;
 
         default:
+          simple_put_back();
           break loop;
       }
     }
 
     string w = buf->get();
-    int wlen = sizeof(w);
 
-    if (wlen > 0) {
-      column += wlen - 1;
+    if (sizeof(w) > 0) {
       current = w;
     }
 
     return ({ w, lambda () {
       current = old_current;
-      column -= wlen;
-      source->seek(pos, Stdio.SEEK_SET);
+      column = old_column;
+      source->seek(old_pos, Stdio.SEEK_SET);
     }});
   }
 
@@ -700,7 +679,7 @@ class Lexer {
           return make_simple_token(.Token.STATIC_ASSERT);
         }
 
-        TODO("Lex symbol with starting _\n");
+        return lex_symbol_name();
       }
 
       case "%": {
@@ -708,6 +687,10 @@ class Lexer {
           return concat() && make_simple_token(.Token.MOD_EQ);
         }
         return make_simple_token(.Token.MOD);
+      }
+
+      case "`": {
+        TODO("Handle backtick `");
       }
 
       default: {
@@ -719,7 +702,7 @@ class Lexer {
             return t;
           }
 
-          TODO("Are we at identifiers now?\n");
+          return lex_symbol_name();
         }
 
         if (char >= '0' && char <= '9') {
@@ -756,16 +739,10 @@ class Lexer {
 
     reset();
 
-    TODO("Verify RESET here\n");
-
     return UNDEFINED;
   }
 
   private .Token.Token lex_identifier() {
-    int pos_in = at_byte;
-    int col_in = column;
-    int line_in = line;
-
     [string word, function reset] = low_read_word();
 
     switch (word) {
@@ -819,8 +796,6 @@ class Lexer {
     }
 
     reset();
-
-    TODO("Verify RESET here\n");
 
     return UNDEFINED;
   }
@@ -881,7 +856,7 @@ class Lexer {
     while (string s = source->read(1)) {
       column += 1;
       if (s == "\n") {
-        werror("FIXME: Handle Newline in string\n");
+        TODO("Handle Newline in string\n");
       } else if (s == "" ) {
         error("Unterminated string literal\n");
       }
@@ -918,5 +893,17 @@ class Lexer {
     current = read_number();
     .Token.Type t = is_float(current) ? .Token.FLOAT : .Token.NUMBER;
     return make_simple_token(t);
+  }
+
+  private .Token.Token lex_symbol_name() {
+    [string word, function reset] = low_read_word();
+
+    if (!word || sizeof(word) < 1) {
+      error("Unresolved symbol\n");
+    }
+
+    current = word;
+
+    return make_simple_token(.Token.SYMBOL_NAME);
   }
 }
