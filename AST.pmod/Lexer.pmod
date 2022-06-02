@@ -455,13 +455,11 @@ protected class BaseLexer {
 
         if ((< "x", "X" >)[next]) {
           state = NUM_HEX;
-          add(s);
-          add(read_non_ws());
+          add(s, read_non_ws());
           read_hex_digits();
         } else if ((< "b", "B" >)[next]) {
           state = NUM_BIN;
-          add(s);
-          add(read_non_ws());
+          add(s, read_non_ws());
           read_binary_digits();
         } else if (
           next && !(<
