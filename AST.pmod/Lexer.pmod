@@ -21,12 +21,44 @@ protected bool is_float(string value) {
   return re->match(value);
 }
 
+public enum State {
+  LEX_STATE_DEFAULT,
+  LEX_STATE_PREPROC_UNQUOTED,
+  LEX_STATE_PREPROC_DEFINE,
+}
+
+#define IS_STATE_DEFAULT (lex_state == LEX_STATE_DEFAULT)
+#define IS_STATE_UNQUOTED (lex_state == LEX_STATE_PREPROC_UNQUOTED)
+#define IS_STATE_DEFINE (lex_state == LEX_STATE_PREPROC_DEFINE)
+
+#define SYNTAX_ERROR(ARGS...) {                                           \
+  string msg = sprintf(ARGS);                                             \
+  if (!has_suffix(msg, "\n")) {                                           \
+    msg += "\n";                                                          \
+  }                                                                       \
+  if (position_start->byte != cursor) {                                   \
+    msg += sprintf("    at byte range %d->%d, column %d->%d",             \
+      position_start->byte, cursor, position_start->column, column + 1);  \
+    if (position_start->line != line) {                                   \
+      msg += sprintf(" on line %d->%d", position_start->line, line);      \
+    } else {                                                              \
+      msg += sprintf(" on line %d", line);                                \
+    }                                                                     \
+    msg += "\n";                                                          \
+  } else {                                                                \
+    msg += sprintf("    at byte %d, column %d on line %d\n",              \
+      cursor, column, line);                                              \
+  }                                                                       \
+  error(msg);                                                             \
+}
+
 protected class BaseLexer {
   protected Stdio.File source;
   protected int line = 1;
   protected int column = 0;
   protected string current;
   protected .Token.Position position_start;
+  protected State lex_state = LEX_STATE_DEFAULT;
 
   protected void create(Stdio.File | string source) {
     if (stringp(source)) {
@@ -60,7 +92,7 @@ protected class BaseLexer {
     .Token.Position end = .Token.Position(at_byte + 1, line, column + 1);
     .Token.Location loc = .Token.Location(input_source, position_start, end);
 
-    return .Token.Token(type, loc, current);
+    return .Token.Token(type, loc, current, lex_state);
   }
 
   protected inline int `cursor() {
@@ -77,6 +109,20 @@ protected class BaseLexer {
     position_start = .Token.Position(at_byte, line, column);
   }
 
+  protected void maybe_reset_lex_state() {
+    if (lex_state == LEX_STATE_PREPROC_UNQUOTED) {
+      TRACE("### reset lex state from unquoted to default\n");
+      lex_state = LEX_STATE_DEFAULT;
+    } else if (lex_state == LEX_STATE_PREPROC_DEFINE) {
+      string prev = skip_behind(2);
+
+      if (prev != "\\") {
+        TRACE("### reset lex state from define to default\n");
+        lex_state = LEX_STATE_DEFAULT;
+      }
+    }
+  }
+
   protected string consume(int n) {
     string value = source->read(n);
     column += sizeof(value);
@@ -86,17 +132,15 @@ protected class BaseLexer {
     }
 
     if (has_value(value, "\n")) {
+      maybe_reset_lex_state();
       array lines = value / "\n";
       int len = sizeof(lines);
       line += len - 1;
 
-
       if (len > 1) {
         column = strlen(lines[-1]);
       } else {
-        TODO("// FIXME: This feels wroooong\n");
-        // FIXME: This feels wroooong
-        column = strlen(value);
+        TODO("Should we end up here?\n");
       }
     }
 
@@ -105,6 +149,16 @@ protected class BaseLexer {
 
   protected variant string consume() {
     return consume(1);
+  }
+
+  protected string move(int n) {
+    consume(n);
+    source->seek(-1, Stdio.SEEK_CUR);
+    return current = source->read(1);
+  }
+
+  protected variant string move() {
+    return move(1);
   }
 
   protected string advance(int n) {
@@ -150,15 +204,39 @@ protected class BaseLexer {
 
   protected void eat_whitespace_and_newline() {
     while ((< " ", "\t", "\v", "\n" >)[current]) {
+      if (current == "\n") {
+        maybe_reset_lex_state();
+      }
       advance();
     }
   }
 
-  protected void eat_newline() {
-    while (current == "\n") {
-      inc_line();
-      advance();
+  protected string skip_behind(int n) {
+    int pos = source->tell();
+    source->seek(-n, Stdio.SEEK_CUR);
+
+    string v = source->read(1);
+    source->seek(pos, Stdio.SEEK_SET);
+
+    return v;
+  }
+
+  protected string look_back_source(int n) {
+    int pos = source->tell();
+    source->seek(-n, Stdio.SEEK_CUR);
+    string v = source->read(n);
+
+    ASSERT_DEBUG(source->tell() == pos, "Wrong position after lookback");
+
+    if (v == "") {
+      return UNDEFINED;
     }
+
+    return v;
+  }
+
+  protected variant string look_back_source() {
+    return look_back_source(1);
   }
 
   protected string peek_source(int n) {
@@ -281,7 +359,8 @@ protected class BaseLexer {
       if (s == "") {
         break;
       } else if (s == "\n") {
-        source->seek(-1, Stdio.SEEK_CUR);
+        maybe_reset_lex_state();
+        simple_put_back();
         break;
       }
 
@@ -302,7 +381,7 @@ protected class BaseLexer {
 
     if (!(cc >= '0' && cc <= '9')) {
       if (cc != '-' && cc != '.') {
-        error("Expected '-' or '.' but got %O\n", current);
+        SYNTAX_ERROR("Expected '-' or '.' but got %O\n", current);
       }
       add(current);
     } else {
@@ -360,8 +439,13 @@ protected class BaseLexer {
       int c = s[0];
 
       if (c == '.') {
+        if (peek_source() == ".") {
+          add(s);
+          exit_loop();
+        }
+
         if (state != NUM_INT && state != NUM_NONE) {
-          error("Malformed number\n");
+          SYNTAX_ERROR("Malformed number\n");
         }
 
         state = NUM_FLOAT;
@@ -379,8 +463,8 @@ protected class BaseLexer {
           add(s);
           add(read_non_ws());
           read_binary_digits();
-        } else if (next && next != ".") {
-          error("An integer can not start with a 0\n");
+        } else if (next && !(< ".", ")", ";", ",", "\\", "]" >)[next]) {
+          SYNTAX_ERROR("An integer can not start with a 0\n");
         } else {
           state = NUM_INT;
           add(s);
@@ -411,6 +495,23 @@ protected class BaseLexer {
 
     return buf->get();
   }
+
+  protected bool gobble(string|int char) {
+    string next = peek_source();
+    bool ok = false;
+
+    if (next && intp(char)) {
+      ok = next[0] == char;
+    } else if (next) {
+      ok = next == char;
+    }
+
+    if (ok) {
+      consume();
+    }
+
+    return ok;
+  }
 }
 
 class Lexer {
@@ -431,7 +532,20 @@ class Lexer {
 
     set_start_position();
 
+    if (IS_STATE_UNQUOTED) {
+      return lex_unquoted(.Token.MACRO_LITERAL);
+    }
+
     switch (current) {
+      case "\\": {
+        TRACE("Current is backslash (\\)");
+        if (lex_state != LEX_STATE_PREPROC_DEFINE) {
+          SYNTAX_ERROR("Illegal character %O\n", current);
+        }
+
+        return make_simple_token(.Token.CONT_LINE);
+      }
+
       case "(": {
         string next = peek_source();
 
@@ -690,7 +804,16 @@ class Lexer {
       }
 
       case "`": {
-        TODO("Handle backtick `");
+        return lex_backtick();
+      }
+
+      case "#": {
+        string next = peek_source();
+        if (next == "\"") {
+          TODO("Lex multiline string");
+        }
+
+        return lex_preprocessor_directive();
       }
 
       default: {
@@ -711,10 +834,7 @@ class Lexer {
           }
         }
 
-        error(
-          "Unknown token %O at \"%s@%d:%d\"\n",
-          current, input_source, position_start->line, position_start->column
-        );
+        SYNTAX_ERROR("Unknown token %O", current);
       }
     }
   }
@@ -732,7 +852,7 @@ class Lexer {
     }
 
     if (has_suffix(word, "__")) {
-      error(
+      SYNTAX_ERROR(
         "Symbols with leading and tailing double underscores are reserved\n"
       );
     }
@@ -822,7 +942,7 @@ class Lexer {
 
     while (string s = source->read(1)) {
       if (s == "") {
-        error("Unterminated block comment\n");
+        SYNTAX_ERROR("Unterminated block comment\n");
       }
 
       if (s == "*" && peek_source() == "/") {
@@ -858,7 +978,7 @@ class Lexer {
       if (s == "\n") {
         TODO("Handle Newline in string\n");
       } else if (s == "" ) {
-        error("Unterminated string literal\n");
+        SYNTAX_ERROR("Unterminated string literal\n");
       }
 
       if (s == "\"" && prev != "\\") {
@@ -879,7 +999,7 @@ class Lexer {
     advance();
 
     if (peek_source() != "'") {
-      error("Unterminated character literal\n");
+      SYNTAX_ERROR("Unterminated character literal\n");
     }
 
     string v = current;
@@ -899,11 +1019,205 @@ class Lexer {
     [string word, function reset] = low_read_word();
 
     if (!word || sizeof(word) < 1) {
-      error("Unresolved symbol\n");
+      SYNTAX_ERROR("Unresolved symbol\n");
     }
 
     current = word;
 
     return make_simple_token(.Token.SYMBOL_NAME);
+  }
+
+  private .Token.Token lex_preprocessor_directive() {
+    // low_read_word() will step back one character
+    consume();
+    [string word, function reset] = low_read_word();
+    current = word;
+
+    if ((< "pike", "charset", "pragma", "include" >)[current]) {
+      lex_state = LEX_STATE_PREPROC_UNQUOTED;
+    } else if (current == "define") {
+      TRACE("*** Set lex state to macro define\n");
+      lex_state = LEX_STATE_PREPROC_DEFINE;
+    }
+
+    return make_simple_token(.Token.MACRO_DIR);
+  }
+
+  private .Token.Token lex_unquoted(.Token.Type t) {
+    simple_put_back();
+
+    String.Buffer buf = String.Buffer();
+    function add = buf->add;
+
+    while (string s = read_non_ws()) {
+      add(s);
+    }
+
+    current = buf->get();
+    return make_simple_token(t);
+  }
+
+  private .Token.Token lex_backtick() {
+    string next = peek_source();
+
+    if (!next) {
+      SYNTAX_ERROR("Expecting token after `\n");
+    }
+
+    #define ASSERT_VALID_NEXT() do {                                      \
+      if (!(< " ", "\t", "\v", "\n", "(", ",", ";" >)[peek_source()]) {   \
+        SYNTAX_ERROR("Illegal ` identifier. Expected %s", current);       \
+      }                                                                   \
+    } while (0)
+
+    int next_c = next[0];
+
+    if (
+      next_c == '_' ||
+      (next_c >= 'a' && next_c <= 'z') ||
+      (next_c >= 'A' && next_c <= 'Z')
+    ) {
+      consume();
+      [string word, function reset] = low_read_word();
+
+      if (word && gobble("=")) {
+        word += "=";
+      }
+
+      current = "`" + word;
+
+      ASSERT_VALID_NEXT();
+
+      return make_simple_token(.Token.SYMBOL_NAME);
+    }
+
+    if (next_c == '(') {
+      move(2);
+
+      if (current != ")") {
+        SYNTAX_ERROR("Illegal ` identifier. Expected `()");
+      }
+
+      current = "`()";
+      return make_simple_token(.Token.SYMBOL_NAME);
+    }
+
+    while (string n = advance()) {
+      int c = n[0];
+
+      switch (c) {
+        case '%':
+        case '&':
+        case '+':
+        case '/':
+        case '^':
+        case '|':
+        case '~': {
+          current = sprintf("`%s", n);
+          ASSERT_VALID_NEXT();
+          return make_simple_token(.Token.SYMBOL_NAME);
+        }
+
+        case '!': {
+          if (gobble("=")) {
+            current = "`!=";
+          } else {
+            current = "`!";
+          }
+
+          ASSERT_VALID_NEXT();
+          return make_simple_token(.Token.SYMBOL_NAME);
+        }
+
+        case '*': {
+          if (gobble("*")) {
+            current = "`**";
+          } else {
+            current = "`*";
+          }
+
+          ASSERT_VALID_NEXT();
+          return make_simple_token(.Token.SYMBOL_NAME);
+        }
+
+        case '-': {
+          if (gobble(">")) {
+            if (gobble("=")) {
+              current = "`->=";
+            } else {
+              current = "`->";
+            }
+          } else {
+            current = "`-";
+          }
+
+          ASSERT_VALID_NEXT();
+          return make_simple_token(.Token.SYMBOL_NAME);
+        }
+
+        case '<': {
+          if (gobble("<")) {
+            current = "`<<";
+          } else if (gobble("=")) {
+            current = "`<=";
+          } else {
+            current = "`<";
+          }
+
+          ASSERT_VALID_NEXT();
+          return make_simple_token(.Token.SYMBOL_NAME);
+        }
+
+        case '>': {
+          if (gobble(">")) {
+            current = "`>>";
+          } else if (gobble("=")) {
+            current = "`>=";
+          } else {
+            current = "`>";
+          }
+
+          ASSERT_VALID_NEXT();
+          return make_simple_token(.Token.SYMBOL_NAME);
+        }
+
+        case '=': {
+          if (gobble("=")) {
+            current = "`==";
+          } else {
+            SYNTAX_ERROR("Illegal ` identifier. Expected `==");
+          }
+
+          ASSERT_VALID_NEXT();
+          return make_simple_token(.Token.SYMBOL_NAME);
+        }
+
+        case '[': {
+          if (gobble("]")) {
+            current = "`[]";
+            if (gobble("=")) {
+              current += "=";
+            }
+          } else if (gobble(".")) {
+            if (!gobble(".")) {
+              SYNTAX_ERROR("Illegal ` identifier. Expected `[..]");
+            }
+
+            if (!gobble("]")) {
+              SYNTAX_ERROR("Illegal ` identifier. Expected `[..]");
+            }
+
+            current = "`[..]";
+          } else {
+            SYNTAX_ERROR("Illegal ` identifier. Expected `[..]");
+          }
+
+          ASSERT_VALID_NEXT();
+          return make_simple_token(.Token.SYMBOL_NAME);
+        }
+      }
+    }
+
+    SYNTAX_ERROR("Illegal ` identifier");
   }
 }

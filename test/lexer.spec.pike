@@ -776,6 +776,13 @@ describe("Comments", lambda () {
     Lexer lexer = Lexer("/* Comment");
     expect(lambda () { lexer->lex(); })->to_throw();
   });
+
+  test("It should add next line on line continuation", lambda () {
+    Lexer l = Lexer("// This continues \
+    on the next line");
+    Token t = l->lex();
+    expect(t->value)->to_equal(" This continues     on the next line");
+  });
 });
 
 /*******************************************************************************
@@ -892,6 +899,13 @@ describe("Strings", lambda () {
       "end": ([ "byte": 12, "column": 13, "line": 1 ]),
       "file": "stdin",
     ]));
+  });
+
+  test("It should handle newline continuations", lambda () {
+    Lexer l = Lexer("\"This is a \
+    string\"");
+    Token t = l->lex();
+    expect(t->value)->to_equal("This is a     string");
   });
 
   test("It should lex a character literal", lambda () {
@@ -1207,6 +1221,102 @@ describe("Symbol names", lambda () {
       "Symbols with leading and tailing double underscores are reserved\n"
     );
   });
+
+  test("It should handle Pike special overload method names", lambda () {
+    Lexer l = Lexer("`()(array in){}");
+    array(Token) toks = ({});
+
+    while (Token t = l->lex()) {
+      toks += ({ t });
+    }
+
+    expect(toks[0]->type)->to_equal(SYMBOL_NAME);
+    expect(toks[0]->value)->to_equal("`()");
+    expect(toks[1]->type)->to_equal(PAREN_LEFT);
+
+    l = Lexer("`^(mixed in){}");
+    toks = ({});
+
+    while (Token t = l->lex()) {
+      toks += ({ t });
+    }
+
+    expect(toks[0]->type)->to_equal(SYMBOL_NAME);
+    expect(toks[0]->value)->to_equal("`^");
+    expect(toks[1]->type)->to_equal(PAREN_LEFT);
+    expect((mapping)toks[1]->location->start)
+      ->to_equal(([ "byte": 2, "column": 3, "line": 1 ]));
+
+    Token t;
+    t = Lexer("`%(){}")->lex();
+    expect(t->value)->to_equal("`%");
+    t = Lexer("`&(){}")->lex();
+    expect(t->value)->to_equal("`&");
+    t = Lexer("`+(){}")->lex();
+    expect(t->value)->to_equal("`+");
+    t = Lexer("`/(){}")->lex();
+    expect(t->value)->to_equal("`/");
+    t = Lexer("`|(){}")->lex();
+    expect(t->value)->to_equal("`|");
+    t = Lexer("`~(){}")->lex();
+    expect(t->value)->to_equal("`~");
+    t = Lexer("`!(){}")->lex();
+    expect(t->value)->to_equal("`!");
+    l = Lexer("`!=(){}");
+    t = l->lex();
+    expect(t->value)->to_equal("`!=");
+    t = l->lex();
+    expect(t->value)->to_equal("(");
+    expect((mapping)t->location->start)
+      ->to_equal(([ "byte": 3, "column": 4, "line": 1  ]));
+    t = Lexer("`*(){}")->lex();
+    expect(t->value)->to_equal("`*");
+    t = Lexer("`**(){}")->lex();
+    expect(t->value)->to_equal("`**");
+    t = Lexer("`-(){}")->lex();
+    expect(t->value)->to_equal("`-");
+    t = Lexer("`->(){}")->lex();
+    expect(t->value)->to_equal("`->");
+    t = Lexer("`->=(){}")->lex();
+    expect(t->value)->to_equal("`->=");
+    t = Lexer("`<<(){}")->lex();
+    expect(t->value)->to_equal("`<<");
+    t = Lexer("`<=(){}")->lex();
+    expect(t->value)->to_equal("`<=");
+    t = Lexer("`<(){}")->lex();
+    expect(t->value)->to_equal("`<");
+    t = Lexer("`==(){}")->lex();
+    expect(t->value)->to_equal("`==");
+    t = Lexer("`>>(){}")->lex();
+    expect(t->value)->to_equal("`>>");
+    t = Lexer("`>=(){}")->lex();
+    expect(t->value)->to_equal("`>=");
+    t = Lexer("`>(){}")->lex();
+    expect(t->value)->to_equal("`>");
+    t = Lexer("`[](){}")->lex();
+    expect(t->value)->to_equal("`[]");
+    l = Lexer("`[..](){}");
+    t = l->lex();
+    expect(t->value)->to_equal("`[..]");
+    t = l->lex();
+    expect((mapping)t->location->start)
+      ->to_equal(([ "byte": 5, "column": 6, "line": 1 ]));
+    t = Lexer("`[]=(){}")->lex();
+    expect(t->value)->to_equal("`[]=");
+  });
+
+  test("It should lex user defined getters and setters", lambda () {
+    Token t;
+    t = Lexer("`name(){}")->lex();
+    expect(t->type)->to_equal(SYMBOL_NAME);
+    expect(t->value)->to_equal("`name");
+    t = Lexer("`name=(){}")->lex();
+    expect(t->value)->to_equal("`name=");
+    t = Lexer("`name_name(){}")->lex();
+    expect(t->value)->to_equal("`name_name");
+    t = Lexer("`name_name=(){}")->lex();
+    expect(t->value)->to_equal("`name_name=");
+  });
 });
 
 /*******************************************************************************
@@ -1295,6 +1405,71 @@ describe("More complex stuff", lambda () {
       ->to_equal(([ "byte": 115, "column": 21, "line": 6 ]));
     expect((mapping)tokens[18]->location->end)
       ->to_equal(([ "byte": 116, "column": 22, "line": 6 ]));
+  });
+});
+
+/*******************************************************************************
+
+  Preprocessor Macros
+
+*******************************************************************************/
+describe("Preprocessor Macros", lambda () {
+  test("It should lex a #pragma directive", lambda () {
+    Lexer l = Lexer("#pragma strict_types\nstring");
+    Token t = l->lex();
+    expect(t->type)->to_equal(MACRO_DIR);
+    expect(t->value)->to_equal("pragma");
+
+    t = l->lex();
+    expect(t->type)->to_equal(MACRO_LITERAL);
+    expect(t->value)->to_equal("strict_types");
+    expect((mapping)t->location->start)
+      ->to_equal(([ "byte":  8, "column": 9, "line": 1 ]));
+  });
+
+  test("It should manage unquoted preproc values", lambda () {
+    Lexer l = Lexer("#include <macro.h>");
+    Token t = l->lex() && l->lex();
+    expect(t->type)->to_equal(MACRO_LITERAL);
+    expect(t->value)->to_equal("<macro.h>");
+
+    l = Lexer("#charset utf-8");
+    t = l->lex() && l->lex();
+    expect(t->type)->to_equal(MACRO_LITERAL);
+    expect(t->value)->to_equal("utf-8");
+  });
+
+  test("It should manage a online pound-define alias", lambda () {
+    Lexer l = Lexer("#define REGEX Regexp.PCRE.Widestring\nint");
+    array(Token) toks = ({});
+
+    while (Token t = l->lex()) {
+      toks += ({ t });
+    }
+
+    expect(sizeof(toks))->to_equal(8);
+    expect(toks[0]->type)->to_equal(MACRO_DIR);
+  });
+
+  test("It should manage a multiline pound-define", lambda () {
+    Lexer l = Lexer(#"
+    #define READ_NUM(N) do { \
+      werror(\"Dude\");      \
+    } while (0)
+
+    string key = \"a\";
+    ");
+    array(Token) toks = ({});
+
+    while (Token t = l->lex()) {
+      toks += ({ t });
+    }
+
+    expect(sizeof(toks))->to_equal(22);
+    expect(toks[0]->context)->to_equal(LEX_STATE_PREPROC_DEFINE);
+    expect(toks[16]->type)->to_equal(PAREN_RIGHT);
+    expect(toks[16]->context)->to_equal(LEX_STATE_PREPROC_DEFINE);
+    expect(toks[17]->context)->to_equal(LEX_STATE_DEFAULT);
   });
 });
 

@@ -1,4 +1,7 @@
-enum Type {
+#charset utf-8
+#pike __REAL_VERSION__
+
+public enum Type {
   /* Taken from the C source */
 
   ADD_EQ,                                 // +=
@@ -112,11 +115,14 @@ enum Type {
   COMMENT,                                // //
   CURLY_LEFT,                             // {
   CURLY_RIGHT,                            // }
+  CONT_LINE,                              // backslash
   DIV,                                    // /
   DOC_COMMENT,                            // //!
   DOT,                                    // .
   GREATER_THAN,                           // >
   LESS_THAN,                              // <
+  MACRO_DIR,                              // #(...)
+  MACRO_LITERAL,                          // string literal
   MAPPING_END,                            // ])
   MAPPING_START,                          // ([
   MINUS,                                  // -
@@ -133,7 +139,24 @@ enum Type {
   XOR,                                    // ^
 }
 
-class Position(
+constant PRAGMA_DIRECTIVES = (<
+  "all_final",
+  "all_inline",
+  "compiler_trace",
+  "deprecation_warnings",
+  "disassemble",
+  "dont_save_parent",
+  "dynamic_dot",
+  "no_compiler_trace",
+  "no_deprecation_warnings",
+  "no_disassemble",
+  "no_dynamic_dot",
+  "no_strict_types",
+  "save_parent",
+  "strict_types",
+>);
+
+public class Position(
   public int byte,
   public int line,
   public int column
@@ -156,7 +179,7 @@ class Position(
   }
 }
 
-class Location(
+public class Location(
   public string file,
   public Position start,
   public Position end
@@ -185,10 +208,11 @@ class Location(
   }
 }
 
-class Token(
+public class Token(
   public Type type,
   public Location location,
-  public string value
+  public string value,
+  int /* .Lexer.State */ context,
 ) {
   protected mixed cast(string how) {
     switch (how) {
@@ -196,7 +220,8 @@ class Token(
         return ([
           "type": type,
           "location": (mapping) location,
-          "value": value
+          "value": value,
+          "context": context,
         ]);
 
       default: error("Can't cast %O to %O\n", object_program(this), how);
@@ -207,8 +232,8 @@ class Token(
     switch (m) {
       default:
         return sprintf(
-          "%O(type: %O, value: %O, location: %O)",
-          object_program(this), type, value, location
+          "%O(type: %O, value: %O, location: %O, ctx: %O)",
+          object_program(this), type, value, location, context
         );
     }
   }
