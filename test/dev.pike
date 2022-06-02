@@ -1,26 +1,19 @@
 import AST.Token;
 import AST.Lexer;
 
-// class Test {
-//   mixed `()() {
-
-//   }
-
-//   mixed `name() {
-//     return "Its a name";
-//   }
-// }
-
 int main() {
-  object file = Stdio.File("test/test-sources/test1.pike");
-  Lexer l = Lexer(file);
+  object file = Stdio.File("test/test-sources/huge.pike");
   array(Token) toks = ({});
 
-  while (Token t = l->lex()) {
-    toks += ({ t });
-  }
+  mixed res = gauge {
+    Lexer l = Lexer(file);
 
+    while (Token t = l->lex()) {
+      toks += ({ t });
+    }
+  };
 
+  werror("Tokenized the entire file: %O tokens in %O\n", sizeof(toks), res);
 
   return 0;
 }

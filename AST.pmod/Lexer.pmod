@@ -463,7 +463,12 @@ protected class BaseLexer {
           add(s);
           add(read_non_ws());
           read_binary_digits();
-        } else if (next && !(< ".", ")", ";", ",", "\\", "]" >)[next]) {
+        } else if (
+          next && !(<
+            ".", ")", ";", ",", ":",
+            "\\", "]", ">", "}", " ", "\t", "\n"
+          >)[next]
+        ) {
           SYNTAX_ERROR("An integer can not start with a 0\n");
         } else {
           state = NUM_INT;
@@ -997,6 +1002,15 @@ class Lexer {
   // FIXME: Escape sequences
   private .Token.Token lex_character_literal() {
     advance();
+
+    if (current == "\\") {
+      advance();
+      current = "\\" + current;
+      if (!gobble("'")) {
+        SYNTAX_ERROR("Unterminated character literal\n");
+      }
+      return make_simple_token(.Token.CHAR);
+    }
 
     if (peek_source() != "'") {
       SYNTAX_ERROR("Unterminated character literal\n");

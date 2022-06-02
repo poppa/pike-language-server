@@ -883,8 +883,10 @@ describe("Strings", lambda () {
   });
 
   test("It should throw on unterminated string literal", lambda () {
-    expect(lambda() { Lexer("\"Unte\\\"rminated")->lex(); })
-      ->to_throw("Unterminated string literal\n");
+    string expmsg =
+      "Unterminated string literal\n" +
+      "    at byte range 0->15, column 1->17 on line 1\n";
+    expect(lambda() { Lexer("\"Unte\\\"rminated")->lex(); })->to_throw(expmsg);
   });
 
   test("Token after string should have correct position", lambda () {
@@ -1216,10 +1218,10 @@ describe("Symbol names", lambda () {
   });
 
   test("It should throw on leading and tailing dunderscore", lambda () {
-    Lexer lexer = Lexer("__my_symbol__");
-    expect(lambda () { lexer->lex(); })->to_throw(
+    string expmsg =
       "Symbols with leading and tailing double underscores are reserved\n"
-    );
+      "    at byte range 0->13, column 1->14 on line 1\n";
+    expect(lambda () { Lexer("__my_symbol__")->lex(); })->to_throw(expmsg);
   });
 
   test("It should handle Pike special overload method names", lambda () {
@@ -1325,6 +1327,26 @@ describe("Symbol names", lambda () {
 
 *******************************************************************************/
 describe("More complex stuff", lambda () {
+  test("It should lex array index range", lambda () {
+    Lexer l = Lexer("my_array[1..]");
+    l->lex();
+    l->lex();
+    l->lex();
+    Token t = l->lex();
+    expect(t->type)->to_equal(DOT_DOT);
+    expect(t->value)->to_equal("..");
+  });
+
+  test("It should lex argument spread", lambda () {
+    Lexer l = Lexer("myfn(mixed ... args)");
+    l->lex();
+    l->lex();
+    l->lex();
+    Token t = l->lex();
+    expect(t->type)->to_equal(DOT_DOT_DOT);
+    expect(t->value)->to_equal("...");
+  });
+
   test("It should do its one-line complex thing", lambda () {
     string code = #"array(string) name = ({ \"Pike\" });";
     Lexer lexer = Lexer(code);
