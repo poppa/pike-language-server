@@ -439,8 +439,8 @@ protected class BaseLexer {
       int c = s[0];
 
       if (c == '.') {
+        // Range, e.g [1..10]
         if (peek_source() == ".") {
-          add(s);
           exit_loop();
         }
 
