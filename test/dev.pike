@@ -15,7 +15,11 @@ int main() {
     }
   };
 
-  werror("Tokenized the entire file: %O tokens in %O\n", sizeof(toks), res);
+  werror("Tokenized the entire file: %O tokens in %fs\n", sizeof(toks), res);
+
+  #ifdef AST_CALL_COUNT
+  werror("Call count: %O\n", get_call_count());
+  #endif
 
   return 0;
 }
