@@ -1353,6 +1353,19 @@ describe("More complex stuff", lambda () {
     expect(t->value)->to_equal("...");
   });
 
+  test("It should lex a range in a switch-case", lambda () {
+    Lexer l = Lexer("case 'a'..'z'");
+    array(Token) ts = ({});
+    while (Token t = l->lex()) {
+      ts += ({ t });
+    }
+
+    expect(sizeof(ts))->to_equal(4);
+    expect(ts[2]->type)->to_equal(DOT_DOT);
+    expect(ts[2]->value)->to_equal("..");
+    expect(ts[3]->type)->to_equal(CHAR);
+  });
+
   test("It should do its one-line complex thing", lambda () {
     string code = #"array(string) name = ({ \"Pike\" });";
     Lexer lexer = Lexer(code);
