@@ -137,6 +137,7 @@ public enum Type {
   SYMBOL_NAME,                            // symbol name
   TILDE,                                  // ~
   XOR,                                    // ^
+  ZERO_ID,                                // zero
 }
 
 constant PRAGMA_DIRECTIVES = (<

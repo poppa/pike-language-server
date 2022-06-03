@@ -707,6 +707,12 @@ describe("Identifiers and keywords", lambda () {
     expect(tok->value)->to_equal("while");
   });
 
+  test("It should lex \"zero\"", lambda () {
+    Token tok = Lexer("zero")->lex();
+    expect(tok->type)->to_equal(ZERO_ID);
+    expect(tok->value)->to_equal("zero");
+  });
+
   test("It should be at next position after lexing keyword", lambda () {
     Lexer lexer = Lexer("array()");
     Token tok = lexer->lex();

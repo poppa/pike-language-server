@@ -916,6 +916,7 @@ class Lexer {
       case "variant": return make_simple_token(.Token.VARIANT);
       case "void": return make_simple_token(.Token.VOID_ID);
       case "while": return make_simple_token(.Token.WHILE);
+      case "zero": return make_simple_token(.Token.ZERO_ID);
     }
 
     reset();
