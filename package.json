@@ -1,0 +1,16 @@
+{
+  "name": "@poppanator/pike-lang-server",
+  "private": true,
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test:pike": "pike -M pike-modules pike-modules/test/test-runner.pike"
+  },
+  "keywords": [],
+  "author": {
+    "name": "Pontus Östlund",
+    "email": "poppanator@gmail.com"
+  },
+  "license": "ISC"
+}
