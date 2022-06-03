@@ -21,6 +21,20 @@ protected bool is_float(string value) {
   return re->match(value);
 }
 
+#ifdef AST_CALL_COUNT
+private mapping(string:int) _call_count = ([]);
+public mapping(string:int) get_call_count() {
+  return _call_count;
+}
+#define ADD_CALL_COUNT() {                                                \
+  string cls = sprintf("%O", object_program(this));                       \
+  string key = cls + "->" __func__ "()";                                  \
+  _call_count[key] += 1;                                                  \
+}
+#else
+#define ADD_CALL_COUNT() 0
+#endif // AST_CALL_COUNT
+
 public enum State {
   LEX_STATE_DEFAULT,
   LEX_STATE_PREPROC_UNQUOTED,
@@ -85,6 +99,8 @@ protected class BaseLexer {
   //! Creates a token with @[current] as value, @[position_start] as start
   //! location and the current position as end location.
   public .Token.Token make_simple_token(.Token.Type type) {
+    ADD_CALL_COUNT();
+
     if (!current) {
       return UNDEFINED;
     }
@@ -124,6 +140,7 @@ protected class BaseLexer {
   }
 
   protected string consume(int n) {
+    ADD_CALL_COUNT();
     string value = source->read(n);
     column += sizeof(value);
 
@@ -170,6 +187,7 @@ protected class BaseLexer {
   }
 
   protected string read_non_ws() {
+    ADD_CALL_COUNT();
     string value = source->read(1);
 
     if (value == "") {
@@ -187,6 +205,7 @@ protected class BaseLexer {
   }
 
   protected void simple_put_back() {
+    ADD_CALL_COUNT();
     column -= 1;
     source->seek(-1, Stdio.SEEK_CUR);
   }
@@ -212,6 +231,7 @@ protected class BaseLexer {
   }
 
   protected string skip_behind(int n) {
+    ADD_CALL_COUNT();
     int pos = source->tell();
     source->seek(-n, Stdio.SEEK_CUR);
 
@@ -222,6 +242,7 @@ protected class BaseLexer {
   }
 
   protected string look_back_source(int n) {
+    ADD_CALL_COUNT();
     int pos = source->tell();
     source->seek(-n, Stdio.SEEK_CUR);
     string v = source->read(n);
@@ -240,6 +261,7 @@ protected class BaseLexer {
   }
 
   protected string peek_source(int n) {
+    ADD_CALL_COUNT();
     ASSERT_DEBUG(n > 0, "n must be greater than 0\n");
 
     int pos = source->tell();
@@ -258,6 +280,7 @@ protected class BaseLexer {
   }
 
   protected string concat(int n) {
+    ADD_CALL_COUNT();
     ASSERT_DEBUG(n > 0, "n must be greater than 0\n");
     string v = current;
 
@@ -274,6 +297,7 @@ protected class BaseLexer {
   }
 
   protected bool read_word(string word) {
+    ADD_CALL_COUNT();
     int len = sizeof(word);
     int pos = source->tell();
     int col_in = column;
@@ -312,6 +336,7 @@ protected class BaseLexer {
   }
 
   protected array low_read_word() {
+    ADD_CALL_COUNT();
     string old_current = current;
     int old_column = column;
     int old_pos = source->tell();
@@ -351,6 +376,7 @@ protected class BaseLexer {
   }
 
   protected string read_line() {
+    ADD_CALL_COUNT();
     int pos = source->tell();
     String.Buffer buf = String.Buffer();
     function add = buf->add;
@@ -374,6 +400,7 @@ protected class BaseLexer {
   }
 
   protected string read_number() {
+    ADD_CALL_COUNT();
     String.Buffer buf = String.Buffer();
     function add = buf->add;
 
@@ -500,6 +527,7 @@ protected class BaseLexer {
   }
 
   protected bool gobble(string|int char) {
+    ADD_CALL_COUNT();
     string next = peek_source();
     bool ok = false;
 
