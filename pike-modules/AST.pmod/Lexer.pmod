@@ -22,17 +22,17 @@ protected bool is_float(string value) {
 }
 
 #ifdef AST_CALL_COUNT
-private mapping(string:int) _call_count = ([]);
-public mapping(string:int) get_call_count() {
-  return _call_count;
-}
-#define ADD_CALL_COUNT() {                                                \
-  string cls = sprintf("%O", object_program(this));                       \
-  string key = cls + "->" __func__ "()";                                  \
-  _call_count[key] += 1;                                                  \
-}
+  private mapping(string:int) _call_count = ([]);
+  public mapping(string:int) get_call_count() {
+    return _call_count;
+  }
+  #define ADD_CALL_COUNT() {                                                \
+    string cls = sprintf("%O", object_program(this));                       \
+    string key = cls + "->" __func__ "()";                                  \
+    _call_count[key] += 1;                                                  \
+  }
 #else
-#define ADD_CALL_COUNT() 0
+  #define ADD_CALL_COUNT() 0
 #endif // AST_CALL_COUNT
 
 public enum State {
@@ -169,6 +169,7 @@ protected class BaseLexer {
   }
 
   protected string move(int n) {
+    ADD_CALL_COUNT();
     consume(n);
     source->seek(-1, Stdio.SEEK_CUR);
     return current = source->read(1);
@@ -179,6 +180,7 @@ protected class BaseLexer {
   }
 
   protected string advance(int n) {
+    ADD_CALL_COUNT();
     return current = consume(n);
   }
 
@@ -211,6 +213,7 @@ protected class BaseLexer {
   }
 
   protected void inc_line() {
+    ADD_CALL_COUNT();
     line += 1;
     column = 0;
   }
