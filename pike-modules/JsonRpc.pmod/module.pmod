@@ -4,6 +4,8 @@ constant VERSION = "2.0";
 
 typedef string|int|Val.Null Id;
 typedef array|mapping Params;
+typedef string|float|int|bool|mapping|Val.Null ResultType;
+typedef string|float|int|bool|array|mapping|Val.Null ErrorData;
 
 public enum error_code {
   //! Invalid JSON was received by the server.
@@ -38,6 +40,7 @@ public class JsonRpcError {
   inherit Error.Generic;
 
   protected int _code;
+  protected Message _request_message;
 
   protected void create(error_code code) {
     this::_code = code;
@@ -63,8 +66,26 @@ public class JsonRpcError {
     ::create(message, backtrace());
   }
 
+  protected variant void create(int code, Message request_message) {
+    this::_request_message = request_message;
+    create(code);
+  }
+
+  protected variant void create(
+    int code,
+    string message,
+    Message request_message
+  ) {
+    this::_request_message = request_message;
+    create(code, message);
+  }
+
   public int `code() {
     return _code;
+  }
+
+  public Message `request_message() {
+    return _request_message;
   }
 }
 
@@ -103,6 +124,25 @@ public class RequestMessage {
   inherit NotificationMessage;
 }
 
+public class ResponseMessage {
+  inherit BaseIdMessage;
+  public ResultType result;
+}
+
+public class ResponseErrorMessage {
+  inherit BaseIdMessage;
+  public ResponseError error;
+}
+
+public class ResponseError {
+  public int code;
+  public string message;
+  public mixed|void data;
+}
+
+public typedef RequestMessage|NotificationMessage Message;
+public typedef ResponseErrorMessage|ResponseMessage Response;
+
 protected BaseMessage construct_instance(
   program(BaseMessage) prog,
   mapping args
@@ -118,12 +158,48 @@ protected BaseMessage construct_instance(
   return instance;
 }
 
+public ResponseMessage make_response_message(ResultType res, void|Id id) {
+  return [object(ResponseMessage)] construct_instance(ResponseMessage, ([
+    "jsonrpc": VERSION,
+    "id": id ? Val.null : id,
+    "result": res,
+  ]));
+}
+
+public ResponseErrorMessage make_response_error(
+  JsonRpcError err,
+  void|ErrorData data,
+  void|Id id
+) {
+
+  Id _id = Val.null;
+
+  if (id) {
+    _id = id;
+  } else if (err->request_message?->id) {
+    _id = err->request_message?->id;
+  }
+
+  return [object(ResponseErrorMessage)] construct_instance(
+    ResponseErrorMessage,
+    ([
+      "jsonrpc": VERSION,
+      "id": _id,
+      "error": ([
+        "code": err->code,
+        "message": err->message(),
+        "data": data,
+      ])
+    ])
+  );
+}
+
 public RequestMessage make_request_message(
   string method,
-  Params|void params,
-  Id|void id
+  void|Params params,
+  void|Id id
 ) {
-  if (!id) {
+  if (undefinedp(id)) {
     id = Standards.UUID.make_version4()->str();
   }
 
@@ -137,13 +213,16 @@ public RequestMessage make_request_message(
 
 public NotificationMessage make_notification_message(
   string method,
-  Params|void params
+  void|Params params
 ) {
-  return [object(NotificationMessage)] construct_instance(NotificationMessage, ([
-    "jsonrpc": VERSION,
-    "method": method,
-    "params": params,
-  ]));
+  return [object(NotificationMessage)] construct_instance(
+    NotificationMessage,
+    ([
+      "jsonrpc": VERSION,
+      "method": method,
+      "params": params,
+    ])
+  );
 }
 
 public bool is_valid_error_code(int code) {

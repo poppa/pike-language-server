@@ -155,4 +155,40 @@ int main() {
     mapping m = ([ "method": "query" ]);
     expect(lambda() { request_to_instance(m); })->to_throw();
   });
+
+  test("make_response_message should do its thing", lambda () {
+    object x = make_response_message("yes");
+    expect(object_program(x))->to_be(JsonRpc.ResponseMessage);
+    expect(x->result)->to_equal("yes");
+  });
+
+  test("make_response_message with id param should do its thing", lambda () {
+    object x = make_response_message("yes", 12);
+    expect(object_program(x))->to_be(JsonRpc.ResponseMessage);
+    expect(x->result)->to_equal("yes");
+    expect(x->id)->to_equal(12);
+  });
+
+  test("make_response_error should do its thing", lambda () {
+    object err = JsonRpc.JsonRpcError(JsonRpc.PARSE_ERROR);
+    object x = make_response_error(err);
+    expect(object_program(x))->to_be(JsonRpc.ResponseErrorMessage);
+    expect(mappingp(x->error))->to_equal(true);
+    expect(x->jsonrpc)->to_equal("2.0");
+    expect(x->error->code)->to_equal(JsonRpc.PARSE_ERROR);
+  });
+
+  test(
+    "make_response_error with id and data params should do its thing",
+    lambda () {
+      object err = JsonRpc.JsonRpcError(JsonRpc.PARSE_ERROR);
+      object x = make_response_error(err, ({ "one", 1 }), 12);
+      expect(object_program(x))->to_be(JsonRpc.ResponseErrorMessage);
+      expect(mappingp(x->error))->to_equal(true);
+      expect(x->jsonrpc)->to_equal("2.0");
+      expect(x->error->code)->to_equal(JsonRpc.PARSE_ERROR);
+      expect(x->id)->to_equal(12);
+      expect(x->error->data)->to_equal(({ "one", 1 }));
+    }
+  );
 }
