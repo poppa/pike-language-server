@@ -1,4 +1,3 @@
-inherit .Lsp : lsp;
 inherit .Base : base;
 
 private Thread.Thread handler_thread;
@@ -20,13 +19,13 @@ public variant void stop() {
 
 protected void send_response(mapping message, void|JsonRpc.Id id) {
   string encoded_message = base::encode_response_message(message, id);
-  werror("send_response() -> %s\n", encoded_message);
+  werror("send_response() -> %O\n", encoded_message);
   output->write(encoded_message);
 }
 
 protected void send_error(JsonRpc.JsonRpcError err) {
   string encoded_error = base::encode_response_error(err);
-  werror("send_error() -> %s\n", encoded_error);
+  werror("send_error() -> %O\n", encoded_error);
   output->write(encoded_error);
 }
 
@@ -38,7 +37,7 @@ protected void start_handler(Stdio.File input, Stdio.File output) {
     .Request req = .parse_raw_request(input);
 
     if (req) {
-      if (mixed err = catch(lsp::handle_request(req))) {
+      if (mixed err = catch(base::handle_request(req))) {
         werror("An error occured, send error response: %O\n", err);
         send_error(err);
       }

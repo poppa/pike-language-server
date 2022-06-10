@@ -5,8 +5,8 @@ constant ERR_SERVER_NOT_INITIALIZED = -32002;
 constant ERR_UNKNOWN = -32001;
 
 public .Request parse_raw_request(Stdio.File input)
-//! This expects that a JSON-RPC message is written to input with
-//! a Content-Length header.
+//! This expects that a JSON-RPC message is written to @[input] with
+//! a `Content-Length` header.
 //!
 //! @throws An error if the body is not JSON parsable
 {

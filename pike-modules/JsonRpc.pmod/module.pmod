@@ -150,7 +150,7 @@ protected BaseMessage construct_instance(
   BaseMessage instance = prog();
 
   foreach (indices(instance), string|mixed key) {
-    if (stringp(key) && !undefinedp(args[key])) {
+    if (stringp(key) && !undefinedp(args[key]) && args[key] != Val.null) {
       instance[key] = args[key];
     }
   }
@@ -171,13 +171,12 @@ public ResponseErrorMessage make_response_error(
   void|ErrorData data,
   void|Id id
 ) {
-
   Id _id = Val.null;
 
   if (id) {
     _id = id;
-  } else if (err->request_message?->id) {
-    _id = err->request_message?->id;
+  } else if (err->request_message && has_index(err->request_message, "id")) {
+    _id = ([object(RequestMessage)]err->request_message)->id || Val.null;
   }
 
   return [object(ResponseErrorMessage)] construct_instance(

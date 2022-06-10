@@ -15,7 +15,7 @@ int main(int argc, array(string) argv) {
   }
 
   if (use_stdio) {
-    Server.Stdio server = Server.Stdio();
+    LSP.Server.Stdio server = LSP.Server.Stdio();
     server->start();
     werror("Post start, now in handler thread land\n");
   }
