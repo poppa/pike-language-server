@@ -1,9 +1,9 @@
 import Pest;
 
 class MyLsp {
-  inherit Server.Lsp;
+  inherit LSP.Server.Base;
   protected mapping init_params = ([]);
-  public function on_test;
+  bool is_initialized = true;
 }
 
 int main() {
@@ -13,16 +13,16 @@ int main() {
       "User-Agent: Stdio\r\n\r\n", sizeof(body)) + body;
 
     Stdio.File f = Stdio.FakeFile(raw);
-    mixed res = Server.parse_raw_request(f);
+    mixed res = LSP.Server.parse_raw_request(f);
 
-    expect(object_program(res))->to_equal(Server.Request);
+    expect(object_program(res))->to_equal(LSP.Server.Request);
   });
 
   test("Lsp server should do stuff", lambda () {
     string body = Standards.JSON.encode(([
       "jsonrpc": "2.0",
       "method": "test",
-      "params": ([ "capabilities": ({ "one", "two" }) ])
+      "params": ([ "capabilities": ([]) ])
     ]));
 
     string raw = sprintf(
@@ -32,12 +32,15 @@ int main() {
     ) + body;
 
     Stdio.File f = Stdio.FakeFile(raw);
-    mixed res = Server.parse_raw_request(f);
+    mixed res = LSP.Server.parse_raw_request(f);
 
     MyLsp lsp = MyLsp();
-    lsp->on_test = fn(lambda (JsonRpc.NotificationMessage mess) {});
+    function on_test = fn(lambda (JsonRpc.NotificationMessage mess) {
+      expect(mess->method)->to_equal("test");
+    });
+    lsp->on("test", on_test);
     lsp->handle_request(res);
 
-    expect(lsp->on_test)->to_have_been_called_n_times(1);
+    expect(on_test)->to_have_been_called_n_times(1);
   });
 }

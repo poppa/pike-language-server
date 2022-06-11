@@ -161,7 +161,7 @@ protected BaseMessage construct_instance(
 public ResponseMessage make_response_message(ResultType res, void|Id id) {
   return [object(ResponseMessage)] construct_instance(ResponseMessage, ([
     "jsonrpc": VERSION,
-    "id": id ? Val.null : id,
+    "id": undefinedp(id) ? Val.null : id,
     "result": res,
   ]));
 }

@@ -18,13 +18,14 @@ public variant void stop() {
 }
 
 protected void send_response(mapping message, void|JsonRpc.Id id) {
-  string encoded_message = base::encode_response_message(message, id);
+  string encoded_message =
+    base::encode_response_message_with_header(message, id);
   werror("send_response() -> %O\n", encoded_message);
   output->write(encoded_message);
 }
 
 protected void send_error(JsonRpc.JsonRpcError err) {
-  string encoded_error = base::encode_response_error(err);
+  string encoded_error = base::encode_response_error_with_header(err);
   werror("send_error() -> %O\n", encoded_error);
   output->write(encoded_error);
 }

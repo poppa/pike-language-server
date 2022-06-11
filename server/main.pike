@@ -1,23 +1,23 @@
 int main(int argc, array(string) argv) {
   werror("Server start called: %O\n", argv);
 
-  string use_pipe;
-  bool use_stdio;
+  string pipe;
+  string mode;
 
   foreach (argv, string arg) {
     if (sscanf(arg, "--pipe=%s", string sock) == 1) {
-      use_pipe = sock;
+      pipe = sock;
+      mode = "pipe";
       break;
     } else if (arg == "--stdio") {
-      use_stdio = true;
+      mode = "stdio";
       break;
     }
   }
 
-  if (use_stdio) {
+  if (mode == "stdio") {
     LSP.Server.Stdio server = LSP.Server.Stdio();
     server->start();
-    werror("Post start, now in handler thread land\n");
   }
 
   return -1;

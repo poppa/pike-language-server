@@ -12,6 +12,7 @@ import {
   ServerOptions,
   TransportKind,
 } from 'vscode-languageclient/node'
+import { PikeClientConfig } from './config'
 
 let defaultClient: LanguageClient
 let clients = new Map<string, LanguageClient>()
@@ -38,6 +39,7 @@ export function activate(context: ExtensionContext) {
 
     let uri = document.uri
     let folder = workspace.getWorkspaceFolder(uri)
+    const config = new PikeClientConfig()
 
     // Untitled files go to a default client.
     if (!folder || uri.scheme === 'untitled') {
@@ -47,7 +49,7 @@ export function activate(context: ExtensionContext) {
           `create default client: Workspace conf: %O`,
           workspace.getConfiguration().get('[pike]')
         )
-        defaultClient = new PikeClient(context)
+        defaultClient = new PikeClient(context, config)
         defaultClient.start()
       } else {
         console.log(`Default client already exist`)
@@ -62,7 +64,7 @@ export function activate(context: ExtensionContext) {
 
     if (!clients.has(folder.uri.toString())) {
       console.log(`Create client for workspace`)
-      let client = new PikeClient(context)
+      let client = new PikeClient(context, config)
       client.start()
       clients.set(folder.uri.toString(), client)
     } else {
@@ -123,7 +125,7 @@ function getOuterMostWorkspaceFolder(folder: WorkspaceFolder): WorkspaceFolder {
 }
 
 class PikeClient extends LanguageClient {
-  public constructor(context: ExtensionContext) {
+  public constructor(context: ExtensionContext, config: PikeClientConfig) {
     const serverModule = context.asAbsolutePath(
       path.join('server', 'main.pike')
     )
@@ -133,26 +135,29 @@ class PikeClient extends LanguageClient {
       serverModule,
     ]
 
-    // The debug options for the server
-    // --inspect=6009: runs the server in Node's Inspector mode so VS Code can
-    // attach to the server for debugging
-    const debugOptions = { execArgv: ['--nolazy', '--inspect=6009'] }
-
     // If the extension is launched in debug mode then the debug server options
     // are used, otherwise the run options are used
     const serverOptions: ServerOptions = {
       run: {
-        // @ts-expect-error
         command: 'pike',
         args: serverModuleOptions,
         transport: TransportKind.stdio,
       },
       debug: {
-        // @ts-expect-error
         command: 'pike',
         args: serverModuleOptions,
         transport: TransportKind.stdio,
-        options: debugOptions,
+        // NOTE! Pike doesn't support the inspect stuff below yet. Keeping it
+        //       as reference
+        // --inspect=6009: runs the server in Node's Inspector mode so VS Code
+        // can attach to the server for debugging
+        options: {
+          execArgv: ['--nolazy', '--inspect=6009'],
+          env: {
+            ...process.env,
+            LSP_DEBUG: '1',
+          },
+        },
       },
     }
 
@@ -165,11 +170,18 @@ class PikeClient extends LanguageClient {
       },
     }
 
+    clientOptions.initializationOptions = config
+
     super(
       'pikeLanguageServer',
       'Pike Language Server',
       serverOptions,
       clientOptions
+    )
+
+    console.log(
+      `This Init Options After Super call: %O`,
+      this.clientOptions.initializationOptions
     )
   }
 }
