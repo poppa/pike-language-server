@@ -78,3 +78,9 @@ mapping change3 = ([ /* 2 elements */
       "version": 4
     ])
 ]);
+
+mapping close_params = ([ /* 1 element */
+  "textDocument": ([ /* 1 element */
+    "uri": "file:///Users/pontus/Desktop/Pike-WS/dump2.pike"
+  ])
+]);

@@ -35,8 +35,8 @@ int main() {
     mixed res = LSP.Server.parse_raw_request(f);
 
     MyLsp lsp = MyLsp();
-    function on_test = fn(lambda (JsonRpc.NotificationMessage mess) {
-      expect(mess->method)->to_equal("test");
+    function on_test = fn(lambda (mapping params) {
+      expect(params->capabilities)->to_equal(([]));
     });
     lsp->on("test", on_test);
     lsp->handle_request(res);

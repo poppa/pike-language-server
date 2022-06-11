@@ -18,6 +18,10 @@ public void start();
 public void stop();
 protected void send_response(mapping message, void|JsonRpc.Id id);
 
+public LSP.TextDocument.Manager `manager() {
+  return text_documents;
+}
+
 protected string encode_response_message_with_header(
   mapping message,
   void|JsonRpc.Id id
@@ -49,30 +53,11 @@ public void handle_request(.Request request) {
   }
 
 
-  emit(rpc->method, rpc);
-
-  // switch (rpc->method) {
-  //   case "textDocument/didChange":
-  //     on_text_document_did_change(rpc);
-  //     return;
-  //   case "textDocument/didOpen":
-  //     on_text_document_did_open(rpc);
-  //     return;
-  //   case "textDocument/didClose":
-  //     on_text_document_did_close(rpc);
-  //     return;
-
-  // }
-
-  // throw(JsonRpc.JsonRpcError(
-  //   JsonRpc.METHOD_NOT_FOUND,
-  //   sprintf("The method %O does not exist or is not available.", rpc->method),
-  //   rpc,
-  // ));
+  emit(rpc->method, rpc->params, rpc->id);
 }
 
-public void on_initialize(JsonRpc.NotificationMessage message) {
-  init_params = message->params;
+public void on_initialize(mapping params, void|JsonRpc.Id id) {
+  init_params = params;
   mapping pcaps = init_params->capabilities;
   mapping caps = ([
     "textDocumentSync": 2,
@@ -98,11 +83,11 @@ public void on_initialize(JsonRpc.NotificationMessage message) {
         "version": .VERSION,
       ])
     ]),
-    message->id
+    id
   );
 }
 
-public void on_initialized(JsonRpc.NotificationMessage message) {
+public void on_initialized(mapping params) {
   is_initialized = true;
 
   if (has_configuration_capability) {
@@ -114,41 +99,13 @@ public void on_initialized(JsonRpc.NotificationMessage message) {
   }
 }
 
-public void on_shutdown(JsonRpc.NotificationMessage message) {
+public void on_shutdown(mapping message) {
   werror("Handle shutdown request\n");
 }
 
-public void on_exit(JsonRpc.NotificationMessage message) {
+public void on_exit(mapping message) {
   werror("Handle exit request\n");
 }
-
-// public void on_text_document_did_change(JsonRpc.NotificationMessage message) {
-//   mapping td = message->params->textDocument;
-//   object doc = text_documents[td->uri];
-
-//   if (!doc) {
-//     werror("Document not found!!!\n");
-//   }
-
-//   doc->update(td->contentChanges, td->version);
-// }
-
-// public void on_text_document_did_open(JsonRpc.NotificationMessage message) {
-//   LSP.TextDocument.Document doc;
-//   doc = LSP.TextDocument.create_document(message->params->textDocument);
-//   text_documents[doc->uri] = doc;
-// }
-
-// public void on_text_document_did_close(JsonRpc.NotificationMessage message) {
-//   string uri = message->params->textDocument->uri;
-
-//   if (text_documents[uri]) {
-//     werror("Zonk document with URI: %O\n", uri);
-//     m_delete(text_documents, uri);
-//   } else {
-//     werror("Document %O no longer in cache\n", uri);
-//   }
-// }
 
 public bool `has_configuration_capability() {
   return !!init_params?->capabilities->workspace?->configuration;

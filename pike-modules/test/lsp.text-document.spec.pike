@@ -12,8 +12,6 @@ describe("TextDocument module", lambda () {
     expect(doc->uri)
       ->to_equal("file:///Users/pontus/Desktop/Pike-WS/dump2.pike");
     expect(doc->line_count)->to_equal(5);
-
-    werror("Doc: %O\n", doc);
   });
 });
 }

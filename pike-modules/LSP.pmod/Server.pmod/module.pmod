@@ -10,7 +10,6 @@ public .Request parse_raw_request(Stdio.File input)
 //!
 //! @throws An error if the body is not JSON parsable
 {
-  werror("parse_raw_request(pos@%d)\n", input->tell());
   String.Buffer buf = String.Buffer();
 
   while (string s = input->read(1)) {
