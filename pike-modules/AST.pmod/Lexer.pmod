@@ -7,6 +7,8 @@
 #define REGEX Regexp.PCRE.Widestring
 #define RegexpOption Regexp.PCRE.OPTION
 
+// NOTE: Many of these regexp aren't used yet, but will serve a purpose when we
+//       get to the point that we want do differentiate different number types.
 protected string float_p = "(0?\\.|[1-9][0-9]*\\.)[0-9]+";
 protected string int_p = "(0|[1-9][0-9]*)";
 protected string num_p = "(" + int_p + "|" + float_p + ")";
@@ -50,19 +52,7 @@ public enum State {
   if (!has_suffix(msg, "\n")) {                                           \
     msg += "\n";                                                          \
   }                                                                       \
-  if (position_start->byte != cursor) {                                   \
-    msg += sprintf("    at byte range %d->%d, column %d->%d",             \
-      position_start->byte, cursor, position_start->column, column + 1);  \
-    if (position_start->line != line) {                                   \
-      msg += sprintf(" on line %d->%d", position_start->line, line);      \
-    } else {                                                              \
-      msg += sprintf(" on line %d", line);                                \
-    }                                                                     \
-    msg += "\n";                                                          \
-  } else {                                                                \
-    msg += sprintf("    at byte %d, column %d on line %d\n",              \
-      cursor, column, line);                                              \
-  }                                                                       \
+  msg += position_info_message;                                           \
   error(msg);                                                             \
 }
 
@@ -83,6 +73,31 @@ protected class BaseLexer {
   }
 
   public .Token.Token lex();
+
+  public string `position_info_message() {
+    string msg = "";
+    if (position_start->byte != cursor) {
+      msg += sprintf(
+        "    at byte range %d..%d, column %d..%d",
+        position_start->byte, cursor, position_start->column, column + 1
+      );
+
+      if (position_start->line != line) {
+        msg += sprintf(" on line %d..%d", position_start->line, line);
+      } else {
+        msg += sprintf(" on line %d", line);
+      }
+
+      msg += "\n";
+    } else {
+      msg += sprintf(
+        "    at byte %d, column %d on line %d\n",
+        cursor, column, line
+      );
+    }
+
+    return msg;
+  }
 
   //! Returns the input source. If the input source was a file on disk the
   //! the path is returns, else @code{stdin@} is returned.
@@ -427,6 +442,7 @@ protected class BaseLexer {
       NUM_EXP,
       NUM_HEX,
       NUM_BIN,
+      NUM_OCTAL,
     };
 
     NumState state = current == "." ? NUM_FLOAT : NUM_NONE;
@@ -497,7 +513,10 @@ protected class BaseLexer {
             "\\", "]", ">", "}", " ", "\t", "\n"
           >)[next]
         ) {
-          SYNTAX_ERROR("An integer can not start with a 0\n");
+          // Is this actually octal, e.g. 0755 as access mode?
+          state = NUM_OCTAL;
+          add(s);
+          read_digits();
         } else {
           state = NUM_INT;
           add(s);
@@ -844,7 +863,7 @@ class Lexer {
       case "#": {
         string next = peek_source();
         if (next == "\"") {
-          TODO("Lex multiline string");
+          TODO("Lex multiline string\n");
         }
 
         return lex_preprocessor_directive();
@@ -886,9 +905,11 @@ class Lexer {
     }
 
     if (has_suffix(word, "__")) {
-      SYNTAX_ERROR(
-        "Symbols with leading and tailing double underscores are reserved\n"
-      );
+      // FIXME: Create a mean to WARN
+      // SYNTAX_ERROR(
+      //   "Symbols with leading and tailing double underscores are reserved\n"
+      // );
+      return make_simple_token(.Token.DUNDERSCORE);
     }
 
     reset();

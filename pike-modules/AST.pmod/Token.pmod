@@ -119,6 +119,7 @@ public enum Type {
   DIV,                                    // /
   DOC_COMMENT,                            // //!
   DOT,                                    // .
+  DUNDERSCORE,                            // Double underscore __XXX__
   GREATER_THAN,                           // >
   LESS_THAN,                              // <
   MACRO_DIR,                              // #(...)

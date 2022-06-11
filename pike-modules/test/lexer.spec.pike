@@ -891,7 +891,7 @@ describe("Strings", lambda () {
   test("It should throw on unterminated string literal", lambda () {
     string expmsg =
       "Unterminated string literal\n" +
-      "    at byte range 0->15, column 1->17 on line 1\n";
+      "    at byte range 0..15, column 1..17 on line 1\n";
     expect(lambda() { Lexer("\"Unte\\\"rminated")->lex(); })->to_throw(expmsg);
   });
 
@@ -924,6 +924,15 @@ describe("Strings", lambda () {
     tok = lexer->lex();
     expect(tok->type)->to_equal(AMP);
   });
+
+  test("It should lex a multiline string", lambda () {
+    Token tok = Lexer(#"#\"
+      multiline string
+      goes here
+    \"")->lex();
+
+    werror("Multiline string token: %O\n", tok);
+  });
 });
 
 /*******************************************************************************
@@ -954,10 +963,10 @@ describe("Numbers", lambda () {
   });
 
   test(
-    "It should throw on an integer longer than 1 char starting with 0",
+    "It should NOT throw on an integer longer than 1 char starting with 0",
     lambda () {
-      Lexer lexer = Lexer("02");
-      expect(lambda() { lexer->lex(); })->to_throw();
+      Lexer lexer = Lexer("0755");
+      expect(lexer->lex()->value)->to_equal("0755");
     }
   );
 
@@ -1223,12 +1232,12 @@ describe("Symbol names", lambda () {
     expect(t->value)->to_equal("__my_symbol");
   });
 
-  test("It should throw on leading and tailing dunderscore", lambda () {
-    string expmsg =
-      "Symbols with leading and tailing double underscores are reserved\n"
-      "    at byte range 0->13, column 1->14 on line 1\n";
-    expect(lambda () { Lexer("__my_symbol__")->lex(); })->to_throw(expmsg);
-  });
+  test(
+    "It should lex leading and tailing dunderscore as DUNDERSCORE",
+    lambda () {
+      expect(Lexer("__my_symbol__")->lex()->type)->to_equal(DUNDERSCORE);
+    }
+  );
 
   test("It should handle Pike special overload method names", lambda () {
     Lexer l = Lexer("`()(array in){}");
