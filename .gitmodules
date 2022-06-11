@@ -1,0 +1,3 @@
+[submodule "dev-deps/Pest.pmod"]
+	path = dev-deps/Pest.pmod
+	url = https://github.com/poppa/pest.git
