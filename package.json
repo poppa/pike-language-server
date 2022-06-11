@@ -4,6 +4,10 @@
   "version": "1.0.0",
   "description": "",
   "main": "./client/out/extension.js",
+  "repository": {
+    "type": "Git",
+    "url": "https://github.com/poppa/pike-language-server.git"
+  },
   "contributes": {
     "languages": [
       {
