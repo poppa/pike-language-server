@@ -47,7 +47,9 @@
     "vscode:prepublish": "npm run build:all",
     "test:pike": "pike -M pike-modules pike-modules/test/test-runner.pike",
     "build:all": "npm run build --workspaces --if-present",
-    "watch:all": "npm run watch --workspaces --if-present"
+    "watch:all": "npm run watch --workspaces --if-present",
+    "git:init:pest": "git submodule update --init --recursive",
+    "git:update:pest": "git submodule update --remote --merge"
   },
   "keywords": [],
   "engines": {
