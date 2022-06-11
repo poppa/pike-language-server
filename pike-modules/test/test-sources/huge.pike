@@ -1,8466 +1,6106 @@
-// $Id: 7271a186e014bf048131ad69590f4bc72bc2c434 $
+// This file is part of Roxen WebServer.
+// Copyright � 1996 - 2009, Roxen IS.
+//
 
-//! Various top-level accessor and factory functions for database objects.
+// @appears Configuration
+//! A site's main configuration
 
-#include "rep.h"
+constant cvs_version = "$Id: a8b43c0f9d3eeae5b96e579cb0c4f94952d2ccfa $";
+#include <module.h>
+#include <module_constants.h>
+#include <roxen.h>
+#include <request_trace.h>
+#include <timers.h>
+
+#define CATCH(P,X) do{mixed e;if(e=catch{X;})report_error("While "+P+"\n"+describe_backtrace(e));}while(0)
+
+// Tell Pike.count_memory this is global.
+constant pike_cycle_depth = 0;
+
+// --- Locale defines ---
+//<locale-token project="roxen_start">   LOC_S  </locale-token>
+//<locale-token project="roxen_config">  LOC_C  </locale-token>
+//<locale-token project="roxen_message"> LOC_M  </locale-token>
+//<locale-token project="roxen_config"> DLOCALE </locale-token>
+#define LOC_S(X,Y)  _STR_LOCALE("roxen_start",X,Y)
+#define LOC_C(X,Y)  _STR_LOCALE("roxen_config",X,Y)
+#define LOC_M(X,Y)  _STR_LOCALE("roxen_message",X,Y)
+#define DLOCALE(X,Y) _DEF_LOCALE("roxen_config",X,Y)
+
+#ifdef THROTTLING_DEBUG
+#undef THROTTLING_DEBUG
+#define THROTTLING_DEBUG(X) report_debug("Throttling: "+X+"\n")
+#else
+#define THROTTLING_DEBUG(X)
+#endif
+
+#ifdef REQUEST_DEBUG
+# define REQUEST_WERR(X) report_debug("CONFIG: "+X+"\n")
+#else
+# define REQUEST_WERR(X)
+#endif
 
 
-// Table access and tools
+#ifdef AVERAGE_PROFILING
 
-#define SQL_TABLE(NAME)							\
-  SqlTools.SqlTable NAME ## _table() {					\
-    SqlTools.SqlTable tbl = REP.get_table (#NAME);			\
-    ASSERT_IF_DEBUG (tbl);						\
-    return tbl;								\
-  }
-#define CACHED_TABLE(NAME)						\
-  REP.CachedTable NAME ## _table() {					\
-    REP.CachedTable tbl = REP.get_table (#NAME);			\
-    ASSERT_IF_DEBUG (tbl);						\
-    return tbl;								\
-  }
-#define OBJECT_TABLE(NAME)						\
-  REP.ObjectTable NAME ## _table() {					\
-    REP.ObjectTable tbl = REP.get_table (#NAME);			\
-    ASSERT_IF_DEBUG (tbl);						\
-    return tbl;								\
-  }
+#if !constant(gethrvtime)
+#define gethrvtime()	gethrtime()
+#endif /* !constant(gethrvtime) */
 
-//! @ignore
-// This defines *_table() functions to get the table object of the
-// appropriate type for every table in REP.
-// counters left out since it's only used internally by REP.SqlCounter.
-SQL_TABLE       (assignments);
-OBJECT_TABLE	(editions);
-SQL_TABLE	(exports);
-SQL_TABLE	(external_items);
-SQL_TABLE	(feed_categories);
-SQL_TABLE	(feed_files);
-SQL_TABLE	(feed_items);
-SQL_TABLE	(file_types);
-SQL_TABLE	(page_categories);
-CACHED_TABLE	(page_groups);
-OBJECT_TABLE	(page_slots);
-SQL_TABLE	(page_status);
-SQL_TABLE	(page_types);
-OBJECT_TABLE	(page_versions);
-CACHED_TABLE	(pages);
-OBJECT_TABLE	(publications);
-CACHED_TABLE	(story_app_parts);
-SQL_TABLE	(story_apps);
-OBJECT_TABLE	(story_categories);
-OBJECT_TABLE    (ads);
-
-//  LDE
-CACHED_TABLE	(labels);
-OBJECT_TABLE	(styles);
-SQL_TABLE	(constraints);
-SQL_TABLE	(parameters);
-OBJECT_TABLE	(field_defs);
-OBJECT_TABLE	(component_defs);
-OBJECT_TABLE    (component_area_defs);
-OBJECT_TABLE	(story_tmpl_defs);
-CACHED_TABLE    (lde_defs);
-OBJECT_TABLE	(user_property_defs);
-
-OBJECT_TABLE	(stories);
-CACHED_TABLE	(story_items);
-OBJECT_TABLE	(story_item_versions);
-SQL_TABLE	(story_item_status);
-
-SQL_TABLE       (data_field_placements);
-
-SQL_TABLE       (external_ids);
-
-SQL_TABLE (changelist);
-SQL_TABLE (changelist_consumers);
-
-OBJECT_TABLE    (buckets);
-OBJECT_TABLE    (bucket_items);
-//! @endignore
-
-#undef SQL_TABLE
-#undef CACHED_TABLE
-#undef OBJECT_TABLE
-
-//! Constants for table lock types.
-constant READ_LOCK = 1;
-constant WRITE_LOCK = 2;
-
-class TableLock
-//! Helper class that locks some tables on creation and unlock them on
-//! destruction, to ensure table locks are unlocked even if the
-//! function throws.
-//!
-//! Recursive locking is allowed, but nested locks won't have any
-//! effect except that there are debug checks that verifies that the
-//! nested lock is a subset of the outermost one.
+class ProfStack
 {
-  REP.PrintDBModule.ThreadBoundSqlConn tb_conn;
+  array current_stack = ({});
 
-  protected REP.REPSession ses;
-  protected array(REP.RWMutex.WriterKey) table_locks; // 0 in nested locks.
-
-  protected void create (mapping(string:int(1..2)) tables)
-  //! Takes a mapping of the tables to lock. Indices are table names
-  //! and values are @[READ_LOCK] or @[WRITE_LOCK].
+  void enter( string k, RequestID id )
   {
-    ses = REP.get_session();
-
-    if (ses->locked_tables) {
-#ifdef DEBUG
-      // Check that the nested lock is a subset of the outer one.
-      foreach (tables; string table; int lock) {
-        ASSERT_IF_DEBUG (lock == READ_LOCK || lock == WRITE_LOCK);
-        ASSERT_IF_DEBUG (ses->locked_tables[table /*%O*/] /*%O*/ >= lock /*%O*/,
-                         table, ses->locked_tables[table], lock);
-      }
-#endif
-
-#ifdef DEBUG_TABLELOCK
-      werror ("Got nested %O\n", this);
-#endif
-    }
-
-    else {
-      ASSERT_IF_DEBUG (!page_slot_order_is_locked());
-
-      ses->locked_tables = tables + ([]);
-
-      // First lock the internal table locks in a well defined order.
-      table_locks = ({});
-      foreach (sort (indices (tables)), string table)
-        if (REP.DBTable tbl = ses->db_tables[table])
-          if (REP.RWMutex table_lock = tbl->table_lock)
-            table_locks += ({table_lock->write_lock()});
-
-      // Next lock in mysql. Need a thread bound connection since the
-      // locks are connection bound.
-      tb_conn = ses->print_db->ThreadBoundSqlConn();
-      array(string) sql_locks = ({});
-      foreach (tables; string table; int lock) {
-        ASSERT_IF_DEBUG (lock == READ_LOCK || lock == WRITE_LOCK);
-        sql_locks += ({"`" + table + "` " +
-                       (lock == WRITE_LOCK ? "WRITE" : "READ")});
-      }
-      // Note that mysql silently replaces the table locks if a LOCK
-      // TABLES already is in effect. It doesn't complain if UNLOCK
-      // TABLES is used without a lock either. That's one reason we
-      // have to be careful with recursive locks.
-      tb_conn->conn->big_query ("LOCK TABLES " + (sql_locks * ","));
-
-#ifdef DEBUG_TABLELOCK
-      werror ("Got %O\n", this);
-#endif
-    }
+    current_stack += ({ ({ k, gethrtime(), gethrvtime() }) });
   }
 
-  protected void destroy()
+  void leave( string k, RequestID id )
   {
-#ifdef DEBUG_TABLELOCK
-    werror ("Releasing %O\n", this);
-#endif
+    int t0 = gethrtime();
+    int t1 = gethrvtime();
 
-    ASSERT_IF_DEBUG (ses == REP.get_session());
-    ASSERT_IF_DEBUG (ses->locked_tables);
-
-    if (table_locks) {
-      ses->locked_tables = 0;
-
-      // Probably not necessary, but destruct the locks explicitly
-      // just to avoid doubt.
-      foreach (table_locks, REP.RWMutex.WriterKey lock)
-        destruct (lock);
-
-      if (tb_conn->conn)
-        // If the connection is destructed then the locks are gone anyway.
-        tb_conn->conn->big_query ("UNLOCK TABLES");
+    if( !sizeof(current_stack ) )
+    {
+//       report_error("Popping out of profiling stack\n");
+      return;
     }
+
+    int i = sizeof( current_stack )-1;
+    while( current_stack[ i ][0] != k && i >= 0 ) i--;
+
+    if(i < 0 )
+    {
+      return;
+    }
+    void low_leave( int i )
+    {
+      int tt = t0-current_stack[i][1];
+      int ttv = t1-current_stack[i][2];
+
+      if( i > 0 ) // Do not count child time in parent.
+      {
+        current_stack[i-1][1]+=tt+gethrtime()-t0;
+        current_stack[i-1][2]+=ttv+gethrvtime()-t1;
+      }
+      current_stack = current_stack[..i-1];
+      add_prof_entry( id, k, tt, ttv );
+    };
+
+    if( i != sizeof( current_stack )-1 )
+    {
+      for( int j = sizeof( current_stack )-1; j>=i; j-- )
+        low_leave( j );
+      return;
+    }
+    low_leave( i );
   }
+}
 
-  //! @ignore
-  DECLARE_OBJ_COUNT;
-  //! @endignore
-
-  protected string _sprintf (int flag)
+class ProfInfo( string url )
+{
+  mapping data = ([]);
+  void add( string k, int h, int hrv )
   {
-    if (flag != 'O') return 0;
-    if (table_locks)
-      return sprintf ("TableLock(%O, {%s})" + OBJ_COUNT,
-                      tb_conn && tb_conn->thread,
-                      ses && ses->locked_tables ?
-                      map ((array) ses->locked_tables,
-                           lambda (array(string|int) ent) {
-                             return ent[0] + ":" +
-                               (ent[1] == WRITE_LOCK ? "w" : "r");
-                           }) * "," : "0");
+    if( !data[k] )
+      data[k] = ({ h, hrv, 1 });
     else
-      return sprintf ("TableLock(%O, nested)" + OBJ_COUNT,
-                      tb_conn && tb_conn->thread);
-  }
-}
-
-int got_table_lock (mapping(string:int(1..2)) tables, void|REP.REPSession ses)
-//! Takes a set of table locks like @[TableLock] does, but only checks
-//! that at least those locks are currently taken, and returns nonzero
-//! in that case.
-{
-  ASSERT_IF_DEBUG (sizeof (tables));
-  if (!ses) ses = REP.get_session();
-  if (!ses->locked_tables) return 0;
-  foreach (tables; string table; int lock) {
-    ASSERT_IF_DEBUG (lock == READ_LOCK || lock == WRITE_LOCK);
-    if (ses->locked_tables[table] < lock)
-      return 0;
-  }
-  return 1;
-}
-
-mapping merge_lock_policies(mixed ... /* mapping, ..., mapping */ lock_mappings)
-//! Takes two or more lock mappings and produces a union where each lock
-//! is set to the maximum necessary type (i.e. READ + WRITE => WRITE).
-{
-  //  The use of max() below depends on WRITE_LOCK > READ_LOCK > 0.
-  ASSERT_IF_DEBUG((WRITE_LOCK > READ_LOCK) && (READ_LOCK > 0));
-
-  mapping res = ([ ]);
-  foreach (lock_mappings, mapping lm) {
-    foreach (lm; string lm_key; int lm_type)
-      res[lm_key] = max(res[lm_key], lm_type);
-  }
-  return res;
-}
-
-class DBMaintenanceLock
-//! This lock allows a section of code to do batch updates on records
-//! without regard to the caches in @[REP.CachedTable] and
-//! @[REP.ObjectTable] objects. When the lock is released, the caches
-//! in all such tables are zapped.
-//!
-//! The notification queue is process synchronously in the current
-//! thread when the lock is acquired. It is also processed again when
-//! the lock is released, just before the object caches are zapped.
-//! Notifications are not processed in the background during the
-//! lifetime of the lock.
-//!
-//! As a design principle, it can be assumed that no other REP session
-//! (i.e. @[REP.REPSession] object) is active during the lifetime of
-//! this lock.
-//!
-//! @note
-//! This class does not lock the tables in MySQL, although that would
-//! probably be a good idea. The reason it's left to the caller is
-//! that all tables must be locked at once, and we don't know what
-//! other tables the caller needs to lock.
-//!
-//! @fixme
-//! This lock currently affects all @[REP.CachedTable] and
-//! @[REP.ObjectTable] objects, something that might need to be
-//! refined later. The reason for the current blunt approach is to not
-//! have to bother with cached references between @[REP.DBObject]s in
-//! different tables.
-//!
-//! @fixme
-//! There ought to be a notification when the lock is released so that
-//! it's possible for subscribers to recover.
-{
-  protected REP.PrintDBModule.NotificationQueue.SyncProcessNotifications
-    sync_proc;
-  protected int finished;
-
-  protected void create()
-  {
-    REP.REPSession session = REP.get_session();
-
-    mixed err = catch {
-        // Time out after an hour if we can't get an exclusive lock.
-        session->make_exclusive(3600);
-      };
-    if (err) {
-      // Probably timeout.
-      // Make us finished to keep the assert in destroy() happy.
-      finished = 1;
-      throw(err);
+    {
+      data[k][0]+=h;
+      data[k][1]+=hrv;
+      data[k][2]++;
     }
-
-    REP.PrintDBModule print_db = REP.get_print_module();
-    REP.PrintDBModule.NotificationQueue queue = print_db->notification_queue;
-
-    sync_proc = queue->SyncProcessNotifications();
-
-    int count = 100;
-    do {
-      sync_proc->process();
-
-      // This is necessary to move the notification calls to the
-      // notification queue so that they all get processed. Also,
-      // considering the nature of this lock, it can be argued that the
-      // REP session ends here in many aspects.
-      REP.get_session()->execute_session_done_callbacks();
-    } while (queue->size() && count--); // Repeat until the queue is
-                                        // empty to make sure we
-                                        // process all cascade
-                                        // notifications triggered by
-                                        // session done callbacks.
-
-    if (!count)
-      error ("Could not flush notification queue.");
-
-    // Currently only a single lock is allowed. Can be relaxed if it
-    // turns out to be necessary.
-    ASSERT_IF_DEBUG (!print_db->has_db_maintenance_lock++);
   }
 
-  //! Finish up - should be called right before the object is about to
-  //! be destructed. The reason we can't do this in destroy() is that
-  //! we don't want to do things requiring mutex locks there due to
-  //! the risk of being called while those mutex locks are already
-  //! taken. C.f. [Bug 6892].
-  this_program finish()
+  array summarize_table( )
   {
-    REP.PrintDBModule print_db = REP.get_print_module();
-    REP.PrintDBModule.NotificationQueue queue = print_db->notification_queue;
+    array table = ({});
+    int n, t, v;
+    foreach( indices( data ), string k  )
+      table += ({ ({ k,
+                     sprintf( "%d", (n=data[k][2]) ),
+                     sprintf("%5.2f",(t=data[k][0])/1000000.0),
+                     sprintf("%5.2f", (v=data[k][1])/1000000.0),
+                     sprintf("%8.2f", t/n/1000.0),
+                     sprintf("%8.2f",v/n/1000.0), }) });
+    sort( (array(float))column(table,2), table );
+    return reverse(table);
+  }
 
-    int count = 100;
-    do {
-      sync_proc->process();
+  void dump( )
+  {
+    write( "\n"+url+": \n" );
+    ADT.Table.table t = ADT.Table.table( summarize_table(),
+                                         ({ "What", "Calls",
+                                            "Time", "CPU",
+                                            "t/call(ms)", "cpu/call(ms)" }));
 
-      // This is necessary to move the notification calls to the
-      // notification queue so that they all get processed. Also,
-      // considering the nature of this lock, it can be argued that the
-      // REP session ends here in many aspects.
-      REP.get_session()->execute_session_done_callbacks();
-    } while (queue->size() && count--); // Repeat until the queue is
-                                        // empty to make sure we
-                                        // process all cascade
-                                        // notifications triggered by
-                                        // session done callbacks.
+    write( ADT.Table.ASCII.encode( t )+"\n" );
 
-#if defined(RUN_SELF_TEST) && defined(REP_ZAP_GARBAGE)
-    // Attempt to increase the likelyhood of triggering a race-condition.
-    sleep(1);
+  }
+}
+
+mapping profiling_info = ([]);
+
+void debug_write_prof( )
+{
+  foreach( sort( indices( profiling_info ) ), string p )
+    profiling_info[p]->dump();
+}
+
+void add_prof_entry( RequestID id, string k, int hr, int hrv )
+{
+  string l = id->not_query;
+//   if( has_prefix( k, "find_internal" ) ) l = dirname(l);
+  if( has_prefix( l, query_internal_location() ) )
+    l = dirname( l ); // enough, really.
+
+  if( !profiling_info[l] )
+    profiling_info[l] = ProfInfo(l);
+
+  profiling_info[l]->add( k, hr, hrv );
+}
+
+void avg_prof_enter( string name, string type, RequestID id )
+{
+  if( !id->misc->prof_stack )
+    id->misc->prof_stack = ProfStack();
+  id->misc->prof_stack->enter( name+":"+type,id );
+}
+void avg_prof_leave( string name, string type, RequestID id )
+{
+  if( !id->misc->prof_stack ) id->misc->prof_stack = ProfStack();
+  id->misc->prof_stack->leave( name+":"+type,id );
+}
 #endif
 
-    print_db->zap_dbobject_caches();
-    destruct (sync_proc);
 
-#if defined(RUN_SELF_TEST) && defined(REP_ZAP_GARBAGE)
-    // Attempt to increase the likelyhood of triggering a race-condition.
-    sleep(1);
+/* A configuration.. */
+inherit Configuration;
+inherit "basic_defvar";
 
-    roxen.describe_all_threads(UNDEFINED, 1);
-#endif
+string module_identifier()
+{
+  return name + "/_config";
+}
 
-    REP.REPSession session = REP.get_session();
-    session->make_nonexclusive();
+protected mapping(RequestID:mapping) current_connections =
+  set_weak_flag( ([ ]), 1 );
 
-    // Reset client sessions since client-side data may be obsolete
-    // after GC/cache flushes.
-    foreach (print_db->client_sessions;
-             string session_id;
-             REP.ClientSession cs) {
-      cs->reset_session (1);
-    }
+void connection_add( RequestID id, mapping data )
+//! Add a connection. The data mapping can contain things such as
+//! currently sent bytes.
+//!
+//! See protocols/http.pike and slowpipe.pike for more information.
+//!
+//! You are not in any way forced to use this method from your
+//! protocol module. The information is only used for debug purposes
+//! in the configuration interface.
+//!
+//! You have to keep a reference to the mapping on your own, none is
+//! kept by the configuration object.
+{
+  current_connections[id] = data;
+}
 
-    ASSERT_IF_DEBUG (!--print_db->has_db_maintenance_lock);
-    finished = 1;
-    return this;
-  }
+mapping connection_drop( RequestID id )
+//! Remove a connection from the list of currently active connections.
+//! Returns the mapping previously added with connection_add, if any.
+{
+  return m_delete( current_connections, id );
+}
 
-  protected void destroy()
+mapping(RequestID:mapping) connection_get( )
+//! Return all currently active connections.
+{
+  return current_connections;
+}
+
+// It's nice to have the name when the rest of __INIT executes.
+string name = roxen->bootstrap_info->get();
+
+//! The hierarchal cache used for the HTTP protocol cache.
+class DataCacheImpl
+{
+  protected typedef array(string|mapping(string:mixed))|string|
+                    function(string, RequestID:string|int) EntryType;
+
+  protected mapping(string:EntryType) cache = ([]);
+
+  protected int current_size;
+  protected int max_size;
+  protected int max_file_size;
+
+  protected int hits, misses;
+
+  mapping get_cache_stats()
   {
-    // finish() must be called before the object is destructed.
-    ASSERT_IF_DEBUG (finished);
+    return ([ "current_size"  : current_size,
+              "max_size"      : max_size,
+              "max_file_size" : max_file_size,
+              "entries"       : sizeof(cache),
+              "hits"          : hits,
+              "misses"        : misses ]);
   }
 
-  void process_notification_queue()
-  //! Process any queued notifications (synchronously).
+  void flush()
   {
-    sync_proc->process();
+#ifndef RAM_CACHE_NO_RELOAD_FLUSH
+    current_size = 0;
+    cache = ([]);
+#endif
   }
 
-  //! @ignore
-  DECLARE_OBJ_COUNT;
-  //! @endignore
+  // Heuristic to calculate the entry size. Besides the data itself,
+  // we add the size of the key. Even though it's a shared string we
+  // can pretty much assume it has no other permanent refs. 1024 is a
+  // constant penalty that accounts for the keypair in the mapping and
+  // that leaf entries are stored in arrays and the metadata mapping.
+#define CALC_ENTRY_SIZE(key, data) (sizeof (data) + sizeof (key) + 1024)
+#define CALC_VARY_CB_SIZE(key) (sizeof (key) + 128)
 
-  protected string _sprintf (int flag)
+  // Expire a single entry.
+  protected void really_low_expire_entry(string key)
   {
-    return flag == 'O' && ("DBMaintenanceLock()" + OBJ_COUNT);
-  }
-}
-
-// Mapping from id to table name.
-// THESE MUST NEVER CHANGE (or existing databases will become inconsistent).
-// Appending is fine, though.
-constant object_tables_by_id = ([
-  1: "publications",
-  2: "editions",
-  3: "page_groups",
-  4: "page_versions",
-  5: "pages",
-  6: "page_slots",
-  7: "stories",
-  8: "story_items",
-  9: "story_item_versions",
-  10: "buckets",
-  11: "ads",
-  12: "bucket_items",
-  13: "story_tmpl_defs",
-  14: "component_defs",
-  15: "component_area_defs",
-  16: "field_defs",
-  17: "styles",
-  18: "story_categories",
-  19: "user_property_defs",
-  20: "labels",
-  21: "lde_defs",
-  22: "story_app_parts",
-]);
-
-constant object_table_ids_by_table = ([
-  "publications":        1,
-  "editions":            2,
-  "page_groups":         3,
-  "page_versions":       4,
-  "pages":               5,
-  "page_slots":          6,
-  "stories":             7,
-  "story_items":         8,
-  "story_item_versions": 9,
-  "buckets":             10,
-  "ads":                 11,
-  "bucket_items":        12,
-  "story_tmpl_defs":     13,
-  "component_defs":      14,
-  "component_area_defs": 15,
-  "field_defs":          16,
-  "styles":              17,
-  "story_categories":    18,
-  "user_property_defs":  19,
-  "labels":              20,
-  "lde_defs":            21,
-  "story_app_parts":     22,
-]);
-
-
-//! Returns the DBObject identified by the parameters
-//! @[object_table_id] and @[object_id].
-//!
-//! @seealso
-//! @[table_and_object_id_by_dbobj]
-mapping(string:mixed)|REP.DBObject
-dbobj_by_table_and_id (int object_table_id, int object_id,
-                       void|REP.OnError on_not_found)
-{
-  string table_name = object_tables_by_id[object_table_id];
-  ASSERT_IF_DEBUG (table_name);
-
-  REP.DBTable tbl = REP.get_table (table_name);
-  ASSERT_IF_DEBUG (tbl);
-
-  function(int,REP.OnError:REP.DBObject) lookup;
-
-  if (tbl->object_get) {
-    lookup = tbl->object_get;
-  } else if (tbl->cached_get) {
-    if (table_name == "pages") {
-      lookup = current_page_by_id;
-    } else {
-      lookup = tbl->cached_get;
+    EntryType e = m_delete(cache, key);
+    if (arrayp(e)) {
+      current_size -= CALC_ENTRY_SIZE (key, e[0]);
+      if (e[1]->co_handle) {
+        remove_call_out(e[1]->co_handle);
+      }
+      if (CacheKey cachekey = e[1]->key) {
+        destruct (cachekey);
+      }
+    } else if (!zero_type(e)) {
+      current_size -= CALC_VARY_CB_SIZE(key);
     }
   }
 
-  ASSERT_IF_DEBUG (lookup);
-  return lookup (object_id, on_not_found);
-}
-
-//! Returns an array ({ object_table_id, object_id }) identifying the
-//! object @[dbo]. It can also handle some CachedTable-style mapping
-//! records.
-//!
-//! @seealso
-//! @[dbobj_by_table_and_id]
-array(int) table_and_object_id_by_dbobj (mapping(string:mixed)|REP.DBObject dbo)
-{
-  string table_name;
-  int object_id;
-
-  if (objectp (dbo)) {
-    object_id = dbo->id();
-    if (dbo->is_rep_db_object) {
-      table_name = dbo->table_name;
-    } else if (dbo->is_rep_page) {
-      table_name = "pages";
+  // NOTE: Avoid using this function if possible! O(n)
+  protected int low_expire_entry(string key_prefix)
+  {
+    if (!key_prefix) return 0;
+    if (arrayp(cache[key_prefix])) {
+      // Leaf node. No need to loop.
+      really_low_expire_entry(key_prefix);
+      return 1;
     }
-  } else if (mappingp (dbo)) {
-    int id;
-    if (id = dbo->story_item_id) {
-      table_name = "story_items";
-      object_id = id;
-    } else if (id = dbo->page_group_id) {
-      table_name = "page_groups";
-      object_id = id;
-    }
-  }
-
-  ASSERT_IF_DEBUG (table_name);
-  int object_table_id = object_table_ids_by_table[table_name];
-  ASSERT_IF_DEBUG (object_table_id);
-  ASSERT_IF_DEBUG (object_id);
-
-  // Extra paranoia check here: returning bogus data can have
-  // seriously bad effects on the database (that aren't revealed until
-  // the next lookup).
-  if (!object_table_id || !object_id) {
-    error ("Couldn't lookup %O (%O %O).", dbo, object_table_id, object_id);
-  }
-
-  return ({ object_table_id, object_id });
-}
-
-mapping(string:mixed)|REP.DBObject
-resolve_unique_object_id (string uniq_obj_id,
-                          void|REP.OnError on_not_found)
-//! Resolve a string returned by @[unique_object_id_by_dbobj].
-{
-  array(string) segs = uniq_obj_id / ":";
-  string table_name = segs[0];
-  int object_table_id = object_table_ids_by_table[table_name];
-  if (!object_table_id) error ("Object table %O not found.\n", table_name);
-  int object_id = (int)segs[1];
-  return dbobj_by_table_and_id (object_table_id, object_id, on_not_found);
-}
-
-REP.DBObject.ExtFieldRef ext_field_ref_from_path (string path,
-                                                  void|REP.OnError on_not_found)
-{
-  array(string) segments = path / "/";
-  string unique_object_id = segments[0..1] * ":";
-  string ext_field = segments[2];
-  int|string subspec;
-  if (sizeof (segments) >= 5) {
-    if (sscanf (segments[3], "i-%d", int idx)) {
-      subspec = idx;
-    } else if (sscanf (segments[3], "s-%s", string idx)) {
-      subspec = idx;
-    } else {
-      return REP.raise_err (on_not_found, "Invalid subspec %s.\n",
-                            segments[3]);
-    }
-  }
-
-  string filename;
-  string extension;
-
-  if (subspec) {
-    if (sizeof (segments) >= 5)
-      filename = segments[-1];
-  } else if (sizeof (segments) >= 4) {
-    filename = segments[-1];
-  }
-
-  extension = filename && has_value (filename, ".") && (filename / ".")[1];
-
-  if (REP.DBObject dbobj = resolve_unique_object_id (unique_object_id,
-                                                     on_not_found)) {
-    if (dbobj->avail_ext_fields[ext_field]) {
-      array(REP.DBObject.ExtFieldRef) matching_refs =
-        filter (Array.flatten (({dbobj->ext_field_refs_for_field (ext_field)})),
-                lambda (REP.DBObject.ExtFieldRef field_ref) {
-                  return !subspec ||
-                    (field_ref && field_ref->subspec == subspec);
-                });
-      if (sizeof (matching_refs))
-        return matching_refs[0];
-      return REP.raise_err (on_not_found, "Subspec %O not found.\n", subspec);
-    } else {
-      return REP.raise_err (on_not_found, "Invalid field %s.\n", ext_field);
-    }
-  }
-
-  return REP.raise_err (on_not_found, "Couldn't resolve path %s.\n",
-                        path);
-}
-
-string unique_object_id_by_dbobj (mapping(string:mixed)|REP.DBObject dbo)
-//! Returns a string that uniquely identifies this object, suitable
-//! for use in external components, such as the UI. The string can be
-//! resolved through @[REP.DB.resolve_unique_object_id].
-{
-  array(int) ids = table_and_object_id_by_dbobj (dbo);
-  string tbl_name = object_tables_by_id[ids[0]];
-  if (!tbl_name) error ("Table id %O not found", ids[0]);
-  return tbl_name + ":" + ids[1];
-}
-
-// Note: These must never change, since that would break existing
-// data. Adding new values is fine, though.
-mapping(int:program) `bucket_item_classes_by_id()
-{
-  return ([
-    1: REP["BucketItem"],
-    2: REP["PagePlacement"],
-    3: REP["StoryPlacement"],
-    4: REP["SIVPlacement"],
-    5: REP["AdPlacement"],
-    6: REP["AdAppearance"],
-    7: REP["PackageAppearance"],
-  ]);
-}
-
-mapping(program:int) `bucket_item_ids_by_class()
-{
-  mapping(int:program) m = bucket_item_classes_by_id;
-  return mkmapping (values (m), indices (m));
-}
-
-object/*REP.BucketItem*/ bucket_item_factory (REP.ObjectTable tbl, int new_rec,
-                                              mapping(string:mixed) rec)
-// Registered as DBObject factory callback in bucket_items_table().
-{
-  program obj_prog = bucket_item_classes_by_id[rec->bucket_item_type_id];
-  if (!obj_prog) {
-    ASSERT_IF_DEBUG (bucket_item_classes_by_id[rec->bucket_item_type_id /*%O*/],
-                     rec->bucket_item_type_id);
-    obj_prog = REP["BucketItem"];
-  }
-  return obj_prog (!new_rec && rec, tbl);
-}
-
-//!
-REP.Bucket bucket_by_id (int(1..) bucket_id, void|REP.OnError on_not_found)
-{
-  return buckets_table()->object_get (bucket_id, on_not_found);
-}
-
-//!
-REP.Bucket create_bucket (void|mapping(string:mixed) init_values,
-                          void|REP.OnError on_value_error)
-{
-  return buckets_table()->object_create (init_values, on_value_error);
-}
-
-//! Returns all buckets where @[dbo] is present. If
-//! @[bucket_item_type] is specified, the search is restricted to
-//! BucketItems of that type (e.g. @[REP.StoryPlacement]).
-array(REP.Bucket) buckets_for_dbobj (mapping(string:mixed)|REP.DBObject dbo,
-                                     void|program bucket_item_type)
-{
-  [int object_table_id, int object_id] = table_and_object_id_by_dbobj (dbo);
-  array(string) where_parts = ({ "object_table_id = :object_table_id",
-                                 "object_id = :object_id",
-                                 "delete_at = 0" });
-  mapping(string:mixed) bindings = ([ "object_table_id": object_table_id,
-                                      "object_id": object_id ]);
-
-  if (bucket_item_type) {
-    int bucket_item_type_id = bucket_item_ids_by_class[bucket_item_type];
-    if (!bucket_item_type_id)
-      error ("Invalid bucket type %O.\n", bucket_item_type);
-    where_parts += ({ "bucket_item_type_id = :bucket_item_type_id" });
-    bindings["bucket_item_type_id"] = bucket_item_type_id;
-  }
-
-  array(int) bucket_ids =
-    Array.uniq (bucket_items_table()->select1 ("bucket_id",
-                                               ({ where_parts * " AND ",
-                                                  bindings })));
-  return buckets_table()->object_get_multi (bucket_ids);
-}
-
-//! Returns all @[REP.BucketItem]:s from which @[dbo] is
-//! referenced. if @[bucket] is specified, only items in that bucket
-//! are returned.  If @[bucket_item_type] is specified, the search is
-//! restricted to BucketItems of that type
-//! (e.g. @[REP.StoryPlacement]).
-//!
-//! If @[only_current_items] is set, only items that return 1 from
-//! @[is_current] will be returned.
-array(REP.BucketItem)
-bucket_items_for_dbobj (mapping(string:mixed)|REP.DBObject dbo,
-                        void|REP.Bucket bucket,
-                        void|program bucket_item_type,
-                        void|int(0..1) only_current_items)
-{
-  [int object_table_id, int object_id] = table_and_object_id_by_dbobj (dbo);
-  array(string) where_parts = ({ "object_table_id = :object_table_id",
-                                 "object_id = :object_id",
-                                 "delete_at = 0" });
-  mapping(string:mixed) bindings = ([ "object_table_id": object_table_id,
-                                      "object_id": object_id ]);
-
-  if (bucket) {
-    where_parts += ({ "bucket_id = :bucket_id" });
-    bindings["bucket_id"] = bucket->id();
-  }
-
-  if (bucket_item_type) {
-    int bucket_item_type_id = bucket_item_ids_by_class[bucket_item_type];
-    if (!bucket_item_type_id)
-      error ("Invalid bucket type %O.\n", bucket_item_type);
-    where_parts += ({ "bucket_item_type_id = :bucket_item_type_id" });
-    bindings["bucket_item_type_id"] = bucket_item_type_id;
-  }
-
-  return filter (bucket_items_table()->object_select (({ where_parts * " AND ",
-                                                         bindings }),
-                                                      UNDEFINED,
-                                                      "ORDER BY `bucket_id`, "
-                                                      "`order`"),
-                 lambda (REP.BucketItem item)
-                 {
-                   if (only_current_items) {
-                     return item->is_current();
-                   }
-
-                   return 1;
-                 });
-}
-
-// Generates a version 5 UUID (hash-based) from namespace and id, used
-// to lookup records in the cache.
-protected string external_uuid_cache_key (string namespace, string id)
-{
-  constant my_namespace = "d38ed85a-dd99-43a4-becb-4acc72da42c5";
-  return Standards.UUID.make_version5 (string_to_utf8(namespace + id),
-                                       my_namespace)->str();
-}
-
-//! Associates the @[REP.DBObject]/@[REP.CachedTable] rec mapping
-//! @[dbo] with the external id @[id] in namespace @[namespace],
-//! unless the @[namespace]/@[id] combination exists already. The
-//! @[REP.DBObject]/@[REP.CachedTable] rec mapping that's actually
-//! associated is returned.
-REP.DBObject|mapping(string:mixed)
-lookup_or_add_external_id (REP.DBObject|mapping(string:mixed) dbo,
-                           string namespace,
-                           string id,
-                           string|void origin_id,
-                           string|void origin_type)
-{
-  SqlTools.SqlTable uuids_table = external_ids_table();
-  [int object_table_id, int object_id] = table_and_object_id_by_dbobj (dbo);
-
-  mapping(string:mixed) insert_rec =
-    ([ "namespace": namespace,
-       "ext_id": id,
-       "object_table_id": object_table_id,
-       "object_id": object_id,
-    ]);
-  if (origin_id) insert_rec["origin_ext_id"] = origin_id;
-  if (origin_type) insert_rec["origin_type"] = origin_type;
-
-  REP.PrintDBModule print_db = REP.get_print_module();
-  string cache_key = external_uuid_cache_key (namespace, id);
-
-  REP.DBObject res;
-
-  if (uuids_table->insert_ignore (insert_rec)) {
-    // Insert successful (i.e. no mapping existed previously).
-    print_db->clear_cached_rec_id_by_uuid (cache_key);
-    res = dbo;
-  } else {
-    res = lookup_external_id (namespace, id, REP.RETURN_ZERO);
-
-    if (!res) {
-      // There was a mapping in external_ids but lookup_external_id
-      // failed, so the external_ids mapping is stale. Replace it.
-      uuids_table->replace (insert_rec);
-      print_db->clear_cached_rec_id_by_uuid (cache_key);
-      res = lookup_external_id (namespace, id);
-    }
-  }
-
-  return res;
-}
-
-//! Resolves the @[REP.DBObject]/@[REP.CachedTable] rec mapping
-//! @[dbo] from the external id @[id] in namespace @[namespace].
-REP.DBObject|mapping(string:mixed)
-lookup_external_id (string namespace,
-                    string id,
-                    void|REP.OnError on_not_found)
-{
-  REP.PrintDBModule print_db = REP.get_print_module();
-  string cache_key = external_uuid_cache_key (namespace, id);
-  int(-1..0)|array(int) object_ids;
-
-  if (!(object_ids = print_db->cached_rec_id_by_uuid (cache_key))) {
-    SqlTools.SqlTable uuids_table = external_ids_table();
-
-    SqlTools.SqlTable.Result res =
-      uuids_table->select (({ "namespace = :namespace AND "
-                              "ext_id = :ext_id",
-                              ([ "namespace": namespace,
-                                 "ext_id": id, ]) }),
-                           ({ "object_table_id",
-                              "object_id" }));
-    int num_rows = res->num_rows();
-
-    if (num_rows == 1) {
-      mapping(string:mixed) rec = res->fetch();
-      object_ids = ({ rec->object_table_id, rec->object_id });
-    } else if (!num_rows) {
-      object_ids = -1;
-    } else {
-      // Should never happen, thanks to table constraints.
-      error ("Multiple entries found for ID %s in namespace %s.\n",
-             id, namespace);
-    }
-
-    print_db->set_cached_rec_id_by_uuid (cache_key, object_ids);
-  }
-
-  if (object_ids == -1)
-    return REP.raise_err (on_not_found,
-                          "ID %s in namespace %s not found.\n",
-                          id, namespace);
-
-  return dbobj_by_table_and_id (@object_ids, on_not_found);
-}
-
-//! Return all @[REP.DBObject]/@[REP.CachedTable] rec mappings
-//! @[dbo] with the original external ID @[id] in namespace @[namespace].
-array(REP.DBObject) lookup_origin_external_id (string namespace, string id)
-{
-  return lookup_origin_external_ids(namespace, ({ id }) );
-}
-
-//! Return all @[REP.DBObject]/@[REP.CachedTable] rec mappings
-//! @[dbo] with any of the original external IDs @[ids] in namespace
-//! @[namespace].
-array(REP.DBObject) lookup_origin_external_ids (string namespace,
-                                                array(string) ids)
-{
-  if (!sizeof(ids)) return ({});
-
-  REP.PrintDBModule print_db = REP.get_print_module();
-  SqlTools.SqlTable uuids_table = external_ids_table();
-
-  SqlTools.SqlTable.Result sql_res =
-    uuids_table->select (({ "namespace = :namespace AND "
-                            "origin_ext_id IN ('" + (ids * "','") + "')",
-                            ([ "namespace": namespace ]) }),
-                         ({ "object_table_id",
-                            "object_id" }));
-
-  array(REP.DBObject) res = ({});
-  while (mapping(string:mixed) rec = sql_res->fetch()) {
-    array(int) object_ids = ({ rec->object_table_id, rec->object_id });
-    res += ({ dbobj_by_table_and_id (@object_ids, REP.RETURN_ZERO) });
-  }
-
-  return res - ({ 0 });
-}
-
-//! Removes the external reference given @[namespace] and @[id].
-void remove_external_id(string namespace, string id)
-{
-  REP.PrintDBModule print_db = REP.get_print_module();
-  string cache_key = external_uuid_cache_key(namespace, id);
-  print_db->clear_cached_rec_id_by_uuid(cache_key);
-
-  SqlTools.SqlTable uuids_table = external_ids_table();
-  uuids_table->delete( ({ "namespace = :namespace AND ext_id = :ext_id",
-                          ([ "namespace" : namespace,
-                             "ext_id"    : id ]) }) );
-}
-
-
-//! Returns all external IDs associated with the
-//! @[REP.DBObject]/@[REP.CachedTable] rec mapping in namespace
-//! @[namespace].
-array(string) external_ids_for_dbobj (REP.DBObject|mapping(string:mixed) dbo,
-                                      string namespace)
-{
-  SqlTools.SqlTable uuids_table = external_ids_table();
-
-  [int object_table_id, int object_id] = table_and_object_id_by_dbobj (dbo);
-
-  return uuids_table->select1 ("ext_id",
-                               ({ "namespace = :namespace AND "
-                                  "object_table_id = :object_table_id AND "
-                                  "object_id = :object_id",
-                                  ([ ":namespace": namespace,
-                                     ":object_table_id": object_table_id,
-                                     ":object_id": object_id, ]) }));
-}
-
-//! Returns all origin external IDs associated with the
-//! @[REP.DBObject]/@[REP.CachedTable] rec mapping in namespace
-//! @[namespace].
-array(string) origin_external_ids_for_dbobj (REP.DBObject|mapping(string:mixed) dbo,
-                                             string namespace)
-{
-  SqlTools.SqlTable uuids_table = external_ids_table();
-
-  [int object_table_id, int object_id] = table_and_object_id_by_dbobj (dbo);
-
-  return uuids_table->select1 ("origin_ext_id",
-                               ({ "namespace = :namespace AND "
-                                  "object_table_id = :object_table_id AND "
-                                  "object_id = :object_id",
-                                  ([ ":namespace": namespace,
-                                     ":object_table_id": object_table_id,
-                                     ":object_id": object_id, ]) }));
-}
-
-//! Returns all namespace and origin types associated with the
-//! @[REP.DBObject]/@[REP.CachedTable] rec mapping in @[dbo].
-array(array(string))
-  namespaces_and_origin_types_for_dbobj(REP.DBObject|mapping(string:mixed) dbo)
-{
-  SqlTools.SqlTable uuids_table = external_ids_table();
-
-  [int object_table_id, int object_id] = table_and_object_id_by_dbobj (dbo);
-
-  SqlTools.SqlTable.Result sql_res =
-    uuids_table->select( ({ "object_table_id = :object_table_id AND "
-                            "object_id = :object_id",
-                            ([ ":object_table_id": object_table_id,
-                               ":object_id": object_id ]) }),
-                         ({ "namespace", "origin_type" }) );
-
-  array(array(string)) res = ({ });
-  while (mapping(string:mixed) rec = sql_res->fetch()) {
-    array(string) entry = ({ rec->namespace, rec->origin_type });
-    res += ({ entry });
-  }
-  return res;
-}
-
-//! Normalizes metadata for externally stored data values. Used by the
-//! DBObject class and the REP GC module. The reason this function
-//! resides here is for the GC to be able to use it without
-//! instantiating a DBObject.
-REP.DBObject.ext_val_info normalize_dbobject_val_info (
-  REP.DBObject.ext_val_info|string val_info)
-{
-  if (val_info) {
-    if (stringp (val_info) && sizeof (val_info) >= 5 &&
-        has_prefix (val_info, "�ke")) {
-      val_info = decode_value (val_info);
-    }
-    if (intp (val_info)) {
-      // Backwards compat.
-      val_info =
-        ([ REP.DBObject.STORAGE_COUNTER: val_info,
-           REP.DBObject.STORAGE_TYPE: REP.DBObject.TYPE_BINARY_STRING ]);
-    }
-    if (mappingp (val_info) && sizeof (val_info) == 2 &&
-        val_info[REP.DBObject.STORAGE_TYPE] &&
-        val_info[REP.DBObject.STORAGE_COUNTER])
-      return val_info;
-  }
-  return UNDEFINED;
-}
-
-REP.Ad ad_by_id (int ad_id, void|REP.OnError on_rec_not_found)
-{
-  REP.ObjectTable tbl = ads_table();
-  return tbl->object_get(ad_id, on_rec_not_found);
-}
-
-REP.Ad ad_by_uuid (string ad_uuid, void|REP.OnError on_rec_not_found)
-{
-  REP.ObjectTable tbl = ads_table();
-  if (REP.Ad ad = ad_by_id (rec_id_by_uuid (tbl, ad_uuid), REP.RETURN_ZERO)) {
-    return ad;
-  }
-
-  return REP.raise_err(on_rec_not_found,
-                       "Record uuid '%s' not found in %s.\n",
-                       ad_uuid, tbl->table);
-}
-
-// Page group versions
-
-REP.PGVersion pgv_by_id (int(1..) page_version_id,
-                         void|REP.OnError on_rec_not_found)
-{
-  return page_versions_table()->object_get (page_version_id, on_rec_not_found);
-}
-
-array(REP.PGVersion) pgvs_by_storage_counter (int(1..) storage_counter)
-{
-  return page_versions_table()->object_select (sprintf ("storage_counter = %d",
-                                                        storage_counter));
-}
-
-array(REP.PGVersion) current_pgvs_by_edition(REP.Edition ed,
-                                             void|REP.Edition.Section sec)
-{
-  ASSERT_IF_DEBUG(ed && ed->id());
-  ASSERT_IF_DEBUG(!sec || (sec->edition() == ed));
-
-  REP.ObjectTable pgv_tbl = page_versions_table();
-  array(REP.PGVersion) ret =
-    pgv_tbl->object_select("page_groups.edition_id = " + (string)ed->id(),
-                           "INNER JOIN page_groups "
-                           "ON page_versions.page_version_id = "
-                           "   page_groups.cur_pgversion_id");
-
-  //  No simple way to filter for a given edition without grabbing all PGVs
-  //  above and then check first slot per PGV.
-  if (sec) {
-    int sec_id = sec->id();
-    ret = filter(ret, lambda(REP.PGVersion pgv) {
-        if (REP.PageSlot first_ps = pgv->first_page_slot())
-          if (first_ps->get("section_id") == sec_id)
-            return true;
-        return false;
-      });
-  }
-
-  return ret - ({ 0 });
-}
-
-REP.PGVersion current_pgv_by_pg_id (int page_group_id,
-                                    void|REP.OnError on_rec_not_found)
-//! Returns zero regardless of @[on_rec_not_found] if the page group
-//! has no current page version.
-{
-  ASSERT_IF_DEBUG(intp(page_group_id));
-  mapping(string:mixed) pg =
-    page_groups_table()->cached_get (page_group_id, on_rec_not_found);
-  if (!pg) return 0;
-
-  int cur_pgversion_id = pg->cur_pgversion_id;
-  return cur_pgversion_id &&
-    page_versions_table()->object_get (cur_pgversion_id, on_rec_not_found);
-}
-
-protected int rec_id_by_uuid (REP.DBTable tbl, string uuid)
-// Get record id by record UUID in the table @[tbl]. It is assumed
-// that if the record id's column name is "foobar_id", the uuid column
-// name is "foobar_uuid".
-{
-  REP.PrintDBModule print_db = REP.get_print_module();
-  if (int rec_id = print_db->cached_rec_id_by_uuid (uuid)) {
-    return rec_id;
-  }
-
-  string id_col = tbl->rec_id_col;
-  string uuid_col = id_col[..<2] + "uuid";
-  array(int) res = tbl->select1 (tbl->quote (id_col),
-                                 tbl->quote (uuid_col) + " = '" +
-                                 tbl->quote (uuid) + "'");
-  ASSERT_IF_DEBUG (sizeof (res) <= 1);
-
-  if (sizeof (res))
-    return print_db->set_cached_rec_id_by_uuid (uuid, res[0]);
-
-  // No negative caching at this point since that would require
-  // invalidation if a record with a previously nonexisting uuid is
-  // inserted.
-  return 0;
-}
-
-mapping(string:mixed) pg_rec_by_uuid (string page_group_uuid,
-                                      void|REP.OnError on_rec_not_found)
-//! Returns the cached record mapping for the page group with the
-//! given uuid. Don't be destructive on the returned mapping.
-{
-  REP.CachedTable pg_tbl = page_groups_table();
-
-  int pg_id = rec_id_by_uuid (pg_tbl, page_group_uuid);
-
-  if (!pg_id)
-    return REP.raise_err (on_rec_not_found,
-                          "Page group with uuid %s not found.\n",
-                          page_group_uuid);
-
-  return pg_tbl->cached_get (pg_id);
-}
-
-REP.PGVersion current_pgv_by_pg_uuid (string page_group_uuid,
-                                      void|REP.OnError on_rec_not_found)
-//! Returns zero regardless of @[on_rec_not_found] if the page group
-//! has no current page version.
-{
-  mapping(string:mixed) pg_rec = pg_rec_by_uuid (page_group_uuid,
-                                                 on_rec_not_found);
-  if (!pg_rec) return 0;
-
-  return current_pgv_by_pg_id (pg_rec->page_group_id, on_rec_not_found);
-}
-
-array(REP.PGVersion) pgvs_by_pg_id (int page_group_id,
-                                    void|int limit,
-                                    void|int include_deleted)
-{
-  REP.PGVersion pgv = current_pgv_by_pg_id (page_group_id, REP.RETURN_ZERO);
-
-  if (!pgv) {
-    // No current pgv for the specified page group. We'll fetch one
-    // from the DB (this is a pretty rare case).
-    REP.ObjectTable pv_tbl = page_versions_table();
-    array(REP.PGVersion) pgvs =
-      pv_tbl->object_select ("page_group_id = " + page_group_id,
-                             0,
-                             "LIMIT 1");
-    if (sizeof (pgvs))
-      pgv = pgvs[0];
-    else
-      return ({});
-  }
-
-  return pgv->all_versions (limit, include_deleted);
-}
-
-array(REP.PGVersion) pgvs_by_pg_uuid (string pg_uuid,
-                                      void|int limit,
-                                      void|int include_deleted)
-//! Returns an array of all pgvs for the given page group uuid,
-//! ordered descending by version.
-{
-  REP.ObjectTable pgv_tbl = page_versions_table();
-  return pgv_tbl->object_select (
-    "page_group_id IN ("
-    "  SELECT page_group_id FROM page_groups"
-    "  WHERE page_group_uuid='" + pgv_tbl->quote (pg_uuid) + "')" +
-    (include_deleted ? "" : " AND is_deleted=0"),
-    0,
-    "ORDER BY page_version_id DESC" +
-    (limit > 0 ? " LIMIT " + limit : ""));
-}
-
-mapping(string:array(REP.PGVersion))
-multi_pgvs_by_pg_uuids (array(string) pg_uuids,
-                        void|int include_deleted)
-//! Returns a mapping from page group uuid to an array of
-//! @[REP.PGVersion] objects for that page group. PGVersions are _not_
-//! sorted in the array, for performance reasons.
-{
-  REP.ObjectTable pgv_tbl = page_versions_table();
-
-  mapping(string:array(REP.PGVersion)) res = ([]);
-
-  foreach (pg_uuids / 500.0, array(string) pg_uuid_chunk) {
-    array(REP.PGVersion) pgvs =
-      pgv_tbl->object_select (
-        "  page_group_uuid IN (" +
-        (map (pg_uuid_chunk,
-              lambda (string pg_uuid)
-              {
-                return "'" + pgv_tbl->quote (pg_uuid) + "'";
-              }) * ",") +
-        ")" +
-        (include_deleted ? "" : " AND page_versions.is_deleted=0"),
-        "INNER JOIN page_groups ON (page_versions.page_group_id = "
-        "                           page_groups.page_group_id)");
-    foreach (pgvs, REP.PGVersion pgv) {
-      string pg_uuid = pgv->get_unver ("page_group_uuid");
-      if (!res[pg_uuid]) res[pg_uuid] = ({});
-      res[pg_uuid] += ({ pgv });
-    }
-  }
-
-  return res;
-}
-
-array(REP.PGVersion) sort_pgvs_by_page_slot_order (array(REP.PGVersion) pgvs)
-//! Returns an array that contains the given pages sorted by the order
-//! of the page slots bound to the first page in each page group.
-//! Assumes that all page groups has at least one page bound to a page
-//! slot. If the pages belong to different editions then the order
-//! between the editions is stable based on publication title, edition date
-//! and id.
-//!
-//! @seealso
-//! @[sort_pages_by_page_slot_order]
-{
-  //  Separate by edition and then use comparison function inside PageSlot
-  //  which will consider page_order and subspec properties. The editions
-  //  are referenced using a key on this form:
-  //
-  //    <pub-title> : <ed-date> : <ed-id>
-  //
-  //  This ensures a good user experience in various interfaces while still
-  //  being reasonable stable if multiple editions are targeted for the same
-  //  date.
-  mapping(string:array(REP.PGVersion)) sort_items = ([ ]);
-  foreach (pgvs, REP.PGVersion pgv) {
-    REP.Edition ed = pgv->edition();
-    string ed_key = sprintf("%s\0%s\0%09d",
-                            ed->publication()->get("title"),
-                            (string) ed->get("publ_date"),
-                            ed->id());
-    if (!sort_items[ed_key])
-      sort_items[ed_key] = ({ });
-    sort_items[ed_key] += ({ pgv });
-  }
-  foreach (sort_items; string ed_key; array(REP.PGVersion) ed_pgvs) {
-    array(REP.PageSlot|int(0..0)) slots = allocate(sizeof(ed_pgvs));
-    foreach (ed_pgvs; int idx; REP.PGVersion ed_pgv) {
-    page_loop:
-      foreach (ed_pgv->pages(), REP.Page page) {
-        if (REP.PageSlot slot = page->page_slot()) {
-          slots[idx] = slot;
-          break page_loop;
-        }
+    // Inner node. Find all its children.
+    int res = 0;
+    foreach(indices(cache); int ind; string key) {
+      if (!key) continue;
+      if (has_prefix(key, key_prefix)) {
+        really_low_expire_entry(key);
+        res++;
       }
     }
-
-    //  NOTE: This sorts slots from mixed sections in section order
-    sort(slots, ed_pgvs);
-    sort_items[ed_key] = ed_pgvs;
+    return res;
   }
 
-  //  Finally traverse the edition keys in alphabetical order and collect
-  //  results.
-  array(REP.PGVersion) res = ({ });
-  foreach (sort(indices(sort_items)), string ed_key)
-    res += sort_items[ed_key];
-  return res;
-}
-
-array(REP.Page) pages_by_page_slot_id (int(1..) page_slot_id)
-{
-  Sql.sql_result sql_res =
-    REP.get_db()->big_query (
-      "SELECT page_groups.cur_pgversion_id, pages.page_id "
-      "  FROM pages "
-      "  JOIN page_groups USING (page_group_id) "
-      " WHERE pages.page_slot_id = " + page_slot_id + " "
-      "   AND page_groups.cur_pgversion_id IS NOT NULL");
-
-  array(REP.Page) res = ({});
-  while (array(string) entry = sql_res->fetch_row())
-    if (REP.PGVersion pgv = pgv_by_id ((int) entry[0])) {
-      // Might fail to find the pgv only if there's a race with the gc.
-
-      // Return 0 on page not found because this code is race sensitive. There
-      // is a risk that the PGV no longer has the page. [EP-1595]
-      if (REP.Page page = pgv->page_by_id ((int) entry[1], REP.RETURN_ZERO)) {
-        ASSERT_IF_DEBUG (page /* pgv: %O, page_id: %O */, pgv, entry[1]);
-        res += ({page});
+  void expire_entry(string key_prefix, RequestID|void id)
+  {
+    if (!id) {
+      low_expire_entry(key_prefix);
+      return;
+    }
+    string url = key_prefix;
+    sscanf(url, "%[^\0]", url);
+    while(1) {
+      EntryType val;
+      if (arrayp(val = cache[key_prefix])) {
+        current_size -= CALC_ENTRY_SIZE (key_prefix, val[0]);
+        m_delete(cache, key_prefix);
+        return;
+      } else if (!zero_type(val)) {
+        current_size -= CALC_VARY_CB_SIZE(key_prefix);
       }
-    }
-
-  return res;
-}
-
-array(array(REP.Page)) multi_pages_by_page_slot_ids (
-  array(int(1..)) page_slot_ids)
-//! Equivalent to @expr{map (@[page_slot_ids], @[pages_by_page_slot_id])@}
-//! but more efficient.
-{
-  if (!sizeof (page_slot_ids)) return ({});
-
-  array(string) id_strs = (array(string)) page_slot_ids;
-  mapping(string:int) id_pos = mkmapping (id_strs, indices (id_strs));
-
-  Sql.sql_result sql_res =
-    REP.get_db()->big_query (
-      "SELECT page_groups.cur_pgversion_id, pages.page_id, "
-      "       pages.page_slot_id "
-      "  FROM pages "
-      "  JOIN page_groups USING (page_group_id) "
-      " WHERE pages.page_slot_id IN (" + (id_strs * ",") + ") "
-      "   AND page_groups.cur_pgversion_id IS NOT NULL");
-
-  array(array(REP.Page)) res = allocate (sizeof (page_slot_ids), ({}));
-  while (array(string) entry = sql_res->fetch_row())
-    if (REP.PGVersion pgv = pgv_by_id ((int) entry[0])) {
-      // Might fail to find the pgv only if there's a race with the gc.
-      REP.Page page = pgv->page_by_id ((int) entry[1]);
-      ASSERT_IF_DEBUG (page /* pgv: %O, page_id: %O */, pgv, entry[1]);
-      ASSERT_IF_DEBUG (!zero_type (id_pos[entry[2]]) /* ps_id: %O */, entry[2]);
-      res[id_pos[entry[2]]] += ({page});
-    }
-
-  return res;
-}
-
-protected REP.PGVersion low_make_infant_pgv (REP.PGVersion src_pgv,
-                                             ReuseStoragePolicy reuse_storage,
-                                             void|REP.Edition edition)
-//! Prepares an object for a new page version based on an old one. The
-//! object is not inserted into the table.
-//!
-//! @param src_pgv
-//! Populate the fields in the new object with the values from this
-//! one. May be zero.
-//!
-//! @param reuse_storage
-//! See @[add_pgv].
-{
-  ASSERT_IF_DEBUG (src_pgv || !reuse_storage);
-
-  REP.PGVersion infant = page_versions_table()->create_infant();
-  DO_IF_DEBUG (infant->is_live = 0);
-
-  if (src_pgv) {
-    ASSERT_IF_DEBUG (src_pgv->get_unver ("page_group_id"));
-    infant->pg_volatile = src_pgv->pg_volatile;
-
-    // Make a copy of src_pgv, but exclude fields that don't really
-    // have something to do with the previous
-    // version. PGVersion.set_fields will fill in appropriate defaults
-    // for them. Fields related to the stored LAYOUT_FILE will be
-    // updated by new_version_fixup (called below).
-    infant->verbatim_copy (src_pgv,
-                           ([ "user_id": 1,
-                              "user_handle": 1,
-                              "user_fullname": 1,
-                              "date_created": 1,
-                              "page_type_id": 1,
-                              "comment": 1, ]));
-
-    mapping(string:mixed) ver_fields = ([]);
-
-    if (reuse_storage <= 0) {
-      if (reuse_storage == OVERWRITEABLE_STORAGE) {
-        // If src_pgv has a user_storage_counter already, we'll reuse
-        // that to allow multiple overwriteable versions since the
-        // last user change.
-        ver_fields->user_storage_counter =
-          src_pgv->get ("user_storage_counter") ||
-          src_pgv->get ("storage_counter");
-      } else {
-        ver_fields->user_storage_counter = 0; // Deleted by new_version_fixup.
-      }
-      ver_fields->storage_counter = REP.get_counter ("storage_counter")->get();
-    }
-    infant->set_fields (ver_fields);
-    infant->parent_version = src_pgv;
-    infant->new_version_fixup (
-      (< DONT_REUSE_STORAGE, OVERWRITEABLE_STORAGE >)[reuse_storage]);
-  }
-
-  else {
-    // Fix pg_volatile for the infant. Cannot (and need not) put it in
-    // the global print_db->pg_volatiles until it gets a page_group_id
-    // (handled in PGVersion.low_set_raw_unver).
-    infant->pg_volatile = ([]);
-
-    // Ensure set_fields always is called so various fields get their
-    // default values.
-    infant->set_unver_fields (([ "edition_id": edition->id() ]));
-    infant->set_fields (([]));
-  }
-
-  return infant;
-}
-
-REP.PGVersion create_page_group (REP.Edition edition,
-                                 mapping(string:mixed) unver_fields,
-                                 void|mapping(string:mixed) ver_fields,
-                                 void|REP.OnError on_value_error)
-//! Creates a page group in the given edition with an initial page
-//! version with its own storage directory.
-//!
-//! The page version is not automatically made current. Use
-//! @[make_pgv_current] for that.
-//!
-//! @[unver_fields] and @[ver_fields] contain the initial for the
-//! record fields in the unversioned storage (i.e. the page_groups
-//! table) and the versioned storage (page_versions), respectively.
-//!
-//! If @expr{@[unver_fields]->page_group_uuid@} is given then there
-//! must not be a page group with that uuid already. An exception is
-//! however if the page group belongs to the same edition and has no
-//! current page version, in which case it is simply changed.
-//!
-//! @seealso
-//! @[add_pgv], @[set_in_current_pgv]
-{
-  REP.PGVersion infant = low_make_infant_pgv (0, 0, edition);
-
-  ASSERT_IF_DEBUG (!unver_fields->page_group_id);
-  ASSERT_IF_DEBUG (!unver_fields->edition_id);
-  ASSERT_IF_DEBUG (!unver_fields->cur_pgversion_id);
-
-  if (unver_fields->page_group_uuid) {
-    // If there already is an empty page group with this uuid for this
-    // edition then we just use it, since it could occur due to races.
-    array(mapping(string:mixed)) pgs =
-      page_groups_table()->cached_select (({"    page_group_uuid = %s "
-                                            "AND edition_id = %d "
-                                            "AND cur_pgversion_id IS NULL",
-                                            unver_fields->page_group_uuid,
-                                            edition->id()}));
-    ASSERT_IF_DEBUG (sizeof (pgs) <= 1);
-    if (sizeof (pgs))
-      unver_fields->page_group_id = pgs[0];
-  }
-  if (!infant->set_unver_fields (unver_fields, on_value_error))
-    return 0;
-
-  if (ver_fields && !infant->set_fields (ver_fields, on_value_error))
-    return 0;
-
-  return page_versions_table()->low_object_create (infant);
-}
-
-void assign_pgv_to_slots (REP.PGVersion pgv,
-                          array(REP.PageSlot) slots,
-                          void|REP.Edition.Section section_hint)
-//! Assign the pages in @[pgv] to the given slots. If there are more
-//! pages than slots then the remaining pages will be assigned to
-//! empty slots after the last given slot, or new slots at the end of
-//! the edition (transitional measure until the client handles the
-//! scratch area). If there are more slots than pages then unconnected
-//! pages are added to @[pgv] which are assigned to the extra slots.
-//!
-//! @[section_hint] will be used if no slots are provided and we have to
-//! find a suitable section to add slots to.
-{
-  array(REP.Page) pages = pgv->pages();
-  REP.PageSlot last_slot;
-  int i;
-
-  if (sizeof(slots))
-    section_hint = 0;
-
-  for (i = 0; i < sizeof (pages); i++) {
-    REP.Page page = pages[i];
-    REP.PageSlot slot;
-
-    if (i < sizeof (slots)) {
-      slot = slots[i];
-      page->set_fields ((["page_slot": slot]));
-    }
-    else {
-      page->set_fields ((["page_slot": last_slot,
-                          "_next_empty_page_slot": 1,
-                          "_next_empty_page_slot_section": section_hint ]));
-      slot = page->page_slot();
-    }
-
-    last_slot = slot;
-  }
-
-  if (i < sizeof (slots)) {
-    array(mapping(string:mixed)) new_pages = ({});
-    for (; i < sizeof (slots); i++)
-      new_pages += ({(["page_slot": slots[i]])});
-    pgv->add_pages (new_pages);
-  }
-}
-
-REP.PGVersion copy_page_group_fields (
-  REP.PGVersion src_pgv,
-  REP.Edition edition,
-  void|mapping(string:mixed) unver_fields,
-  void|mapping(string:mixed) ver_fields,
-  void|REP.OnError on_value_error)
-{
-  unver_fields = src_pgv->get_rec_unver() -
-    ({"page_group_id", "edition_id", "cur_pgversion_id", "page_group_uuid",
-      "is_deleted", "delete_at", "date_created" }) +
-    (["is_edit_locked": 0]) +
-    (unver_fields || ([]));
-  ver_fields = src_pgv->get_rec() -
-    ({"page_version_id", "storage_counter", "user_storage_counter",
-      "page_group_id", "page_status_id", "comment", "pages", "text_flow_links",
-
-      //  Fields that are version-dependent that new_version_fixup()
-      //  will clear in the infant, and that we don't wish to overwrite.
-      //  They will be regenerated in IDS document processing.
-      "markup_error", "preflight_result", "file_md", "indesign_version",
-      "placements_bucket_id"
-    }) +
-    (ver_fields || ([]));
-
-  REP.PGVersion new_pgv = REP.DB.create_page_group (edition, unver_fields,
-                                                    ver_fields, on_value_error);
-
-  // Copy page group categories
-  Sql.Sql sql = REP.get_db();
-  sql->query("INSERT INTO page_categories "
-             "            (page_group_id, is_main, is_inherited, "
-             "             page_category) "
-             "    (SELECT %d, is_main, is_inherited, page_category "
-             "       FROM page_categories "
-             "      WHERE page_group_id = %d) ",
-             new_pgv->get ("page_group_id"),
-             src_pgv->get ("page_group_id"));
-
-  return new_pgv;
-}
-
-REP.PGVersion copy_page_group (REP.PGVersion src_pgv,
-                               REP.Edition edition,
-                               void|mapping(string:mixed) unver_fields,
-                               void|mapping(string:mixed) ver_fields,
-                               void|REP.OnError on_value_error,
-                               void|int dont_copy_layout_file,
-                               void|int dont_copy_stories)
-//! Creates a new page group in @[edition] that is a copy of
-//! @[src_pgv]. @[unver_fields] and @[ver_fields] can be used to
-//! override specific fields in the copy. It is not made current.
-{
-  REP.PGVersion new_pgv = copy_page_group_fields (src_pgv, edition,
-                                                  unver_fields, ver_fields,
-                                                  on_value_error);
-  if (!new_pgv) return 0;
-
-  array(mapping(string:mixed)) new_pages =
-    map (src_pgv->pages(),
-         lambda (REP.Page page) {
-           return page->get_rec() - ({"page_id", "page_slot_id"});
-         });
-  // Could avoid another db query here if we could get the infant from
-  // create_page_group.
-  new_pgv->add_pages (new_pages);
-
-  if (!dont_copy_layout_file) {
-    // Only copy the UNPROC file and let the InDesign server do its work
-    // (update page numbers/page variables, extract templates and other
-    // things that differ between page groups).
-
-    if (string src_path =
-        src_pgv->get_existing_layout_filepath (REP.RETURN_ZERO))
-      new_pgv->store_file_by_copy (REP.get_print_module()->get_file_db_path() +
-                                   src_path,
-                                   REP.Storage.UNPROC_LAYOUT_FILE,
-                                   src_pgv->layout_mime_type(),
-                                   UNDEFINED,
-                                   UNDEFINED,
-                                   src_pgv);
-  }
-
-  if (!dont_copy_stories) {
-    REP.DB.copy_stories_between_page_groups (src_pgv, new_pgv);
-  }
-
-  return new_pgv;
-}
-
-enum ReuseStoragePolicy {
-  DONT_REUSE_KEEP_METADATA = -2,
-  OVERWRITEABLE_STORAGE = -1,
-  DONT_REUSE_STORAGE = 0,
-  REUSE_STORAGE = 1,
-}
-
-REP.PGVersion add_pgv (REP.PGVersion old_pgv, int reuse_storage,
-                       void|mapping(string:mixed) changed_fields,
-                       void|REP.OnError on_value_error)
-//! Makes a new page version based on an old one.
-//!
-//! The new page version is not automatically made current. Use
-//! @[make_pgv_current] for that. @[set_in_current_pgv] might be more
-//! convenient if no new storage is needed.
-//!
-//! @param old_pgv
-//! The basis for the new page version.
-//!
-//! @param reuse_storage
-//! If equal to 1 then the new page version uses the same storage as
-//! the old one, if equal to 0 it gets its own storage. If equal to
-//! -1, it gets its own storage but is flagged as overwriteable in
-//! case of a content conflict (for example, a PGVersion created as a
-//! result of repagination can be overwritten since pagination will
-//! take place on the newly created PGVersion as well.)
-//!
-//! @param changed_fields
-//! Changes in versioned fields wrt @[old_pgv].
-//!
-//! @param on_value_error
-//! How to report errors from the @[change_fields] setter.
-//!
-//! @note
-//! All fields are set using the high-level setters @expr{set_fields@}.
-//!
-//! @seealso
-//! @[create_page_group]
-{
-  ASSERT_IF_DEBUG (old_pgv);
-
-  REP.PGVersion infant = low_make_infant_pgv (old_pgv, reuse_storage);
-
-  if (changed_fields && !infant->set_fields (changed_fields, on_value_error))
-    return 0;
-
-  REP.PGVersion new_pgv = page_versions_table()->low_object_create (infant);
-
-  if (reuse_storage) copy_data_field_placements (old_pgv, new_pgv);
-
-  return new_pgv;
-}
-
-REP.PGVersion add_pgv_with_files (REP.PGVersion old_pgv,
-                                  multiset(REP.Storage.FileType) keep_types,
-                                  void|mapping(string:mixed) changed_fields,
-                                  void|REP.OnError on_value_error)
-//! Like add_pgv, but doesn't reference the same storage. Instead,
-//! only the @[REP.Storage.FileType]:s specified by keep_types will be
-//! copied from @[old_pgv].
-{
-  ReuseStoragePolicy reuse_storage = DONT_REUSE_STORAGE;
-
-  // Imply that the new version is overwriteable if we're copying the
-  // layout files. Logically, that means the versions have identical
-  // contents.
-  if (keep_types[REP.Storage.UNPROC_LAYOUT_FILE] &&
-      keep_types[REP.Storage.LAYOUT_FILE])
-    reuse_storage = DONT_REUSE_KEEP_METADATA;
-
-  REP.PGVersion new_pgv = add_pgv (old_pgv, reuse_storage, changed_fields,
-                                   on_value_error);
-
-  if (keep_types[REP.Storage.UNPROC_LAYOUT_FILE] &&
-      keep_types[REP.Storage.LAYOUT_FILE])
-    copy_data_field_placements (old_pgv, new_pgv);
-
-  array(REP.Storage.FileType) ordered_types = (array)keep_types;
-  sort (map (ordered_types,
-             lambda (REP.Storage.FileType type)
-             { // Kludge: SPLIT_LAYOUT_FILE needs to be copied after
-               // LAYOUT_FILE due to how get_page_filepath works
-               // internally.
-               if (type == REP.Storage.SPLIT_LAYOUT_FILE)
-                 return 1;
-
-               return REP.Storage.reverse_dependency_order[type];
-             }),
-        ordered_types);
-
-  string base_db_path = REP.Storage.file_db_path();
-
-  string layout_mime = old_pgv->layout_mime_type();
-  string unproc_mime = old_pgv->unproc_mime_type();
-
-  foreach (ordered_types, REP.Storage.FileType type) {
-    foreach (old_pgv->get_page_files (type, 1), string src_db_path) {
-      int|REP.Page|string subspec;
-      if ((< REP.Storage.UNPROC_LAYOUT_FILE, REP.Storage.LAYOUT_FILE>)[type]) {
-        //  FIXME: Is this identical to new_pgv->layout_mime_type()? If so,
-        //         remove this if branch.
-        subspec =
-          (type == REP.Storage.UNPROC_LAYOUT_FILE) ? unproc_mime : layout_mime;
-      } else {
-        //  Ask new pgv to fetch subspec for all other types
-        subspec = new_pgv->get_page_file_subspec(src_db_path);
-      }
-      new_pgv->store_file_by_copy (base_db_path + src_db_path,
-                                   type,
-                                   subspec,
-                                   UNDEFINED,
-                                   UNDEFINED,
-                                   (type == REP.Storage.UNPROC_LAYOUT_FILE ?
-                                    old_pgv :
-                                    UNDEFINED));
-    }
-  }
-
-  return new_pgv;
-}
-
-REP.PGVersion add_pgv_except_files (REP.PGVersion old_pgv,
-                                    multiset(REP.Storage.FileType) exclude_types,
-                                    void|mapping(string:mixed) changed_fields,
-                                    void|REP.OnError on_value_error)
-//! Like add_pgv_with_files, but copies all file types _except_ those
-//! in @[exclude_types].
-{
-  return add_pgv_with_files (old_pgv,
-                             old_pgv->list_file_types() - exclude_types,
-                             changed_fields,
-                             on_value_error);
-}
-
-int(0..1) make_pgv_current (REP.PGVersion new_pgv,
-                            void|REP.PGVersion old_pgv,
-                            void|REP.OnError on_stale_pgv)
-//! Makes @[new_pgv] become the current page group version for the
-//! page by setting page_groups.cur_pgversion_id.
-//!
-//! The current page version must be @[old_pgv] (i.e. zero if
-//! @[new_pgv] is the first version), otherwise it's an error which is
-//! signalled according to @[on_stale_pgv].
-//!
-//! If @[old_pgv] is undefined then @[new_pgv] is simply made current.
-//! That means an unavoidable race condition. If @[new_pgv] already is
-//! current or older, then nothing is done and the function returns
-//! successfully.
-{
-  TableLock lock = TableLock (table_locks_for_pgv_and_page_changes);
-  int ok = unlocked_make_pgv_current (new_pgv, old_pgv, on_stale_pgv);
-  destruct (lock);
-  return ok;
-}
-
-int(0..1) unlocked_make_pgv_current (REP.PGVersion new_pgv,
-                                     void|REP.PGVersion old_pgv,
-                                     void|REP.OnError on_stale_pgv)
-{
-  ASSERT_IF_DEBUG (!old_pgv || (old_pgv->get ("page_group_id") ==
-                                new_pgv->get ("page_group_id")));
-  ASSERT_IF_DEBUG (old_pgv != new_pgv);
-  ASSERT_IF_DEBUG (!new_pgv->is_live);
-  ASSERT_IF_DEBUG (!old_pgv || old_pgv->id() /* %O */ < new_pgv->id() /* %O */,
-                   old_pgv, new_pgv);
-
-  REP.PGVersion cur_pgv = new_pgv->current_pgv();
-  if (!zero_type (old_pgv) && old_pgv != cur_pgv)
-    return REP.raise_err (on_stale_pgv, "Cannot make stale "
-                          "page group version %O current "
-                          "(latest is %O but expected %O).\n",
-                          new_pgv, cur_pgv, old_pgv);
-
-  if (cur_pgv && new_pgv->id() <= cur_pgv->id())
-    return 1;
-
-  REP.DB.page_groups_table()->cached_update (
-    (["page_group_id": new_pgv->get ("page_group_id"),
-      "cur_pgversion_id": new_pgv->id()]));
-  DO_IF_DEBUG (new_pgv->is_live = 1);
-
-  new_pgv->internal_update_pages (1);
-  new_pgv->invalidate_appearances();
-
-  // Check if we need to mark some old versions as deleted.
-  RoxenModule print_db = REP.get_print_module();
-  int limit = print_db->query("item_version_limit");
-  if (limit > 0) {
-    mixed uid = new_pgv->get("user_id");
-    int is_null_uid =
-      (uid == Roxen.null) ||
-      zero_type(new_pgv->get("user_id"));
-
-    array(int) versions = page_versions_table()->
-      select1("page_version_id",
-              ("is_deleted = 0 AND " +
-               (!is_null_uid ?
-                "user_id = " + uid :
-                "user_id IS NULL") + " AND "
-               "page_group_id = " + new_pgv->get("page_group_id") + " AND "
-               "page_version_id <= " + new_pgv->id()),
-              UNDEFINED, "ORDER BY page_version_id DESC")[limit..];
-    foreach(versions, int page_version_id) {
-      // Could consider optimizing this for objects not in the cache
-      // by only updating the db, but then we need to address the race
-      // that occurs if an object is created from another thread.
-      if (REP.PGVersion pgv = pgv_by_id (page_version_id, REP.RETURN_ZERO))
-        pgv->delete (1);
-    }
-  }
-
-  page_versions_table()->
-    schedule_record_notification ("new_version", new_pgv, cur_pgv);
-
-  new_pgv->parent_version = 0;
-
-  if (!cur_pgv ||
-      (cur_pgv->get("storage_counter") != new_pgv->get("storage_counter"))) {
-    // The layout file has changed.
-    new_pgv->edition()->bump_page_changed();
-  }
-
-  return 1;
-}
-
-REP.PGVersion set_in_current_pgv (
-  REP.PGVersion pgv,
-  mapping(string:mixed) fields,
-  void|mapping(REP.Page:mapping(string:mixed)) page_fields,
-  void|int remove_pages,
-  void|array(mapping(string:mixed)) add_pages,
-  void|mapping(string:mixed) unver_fields,
-  void|REP.OnError on_value_error)
-//! Sets fields in the current page version for the page group. I.e.
-//! creates a new page version with reused storage, do the changes,
-//! and makes it current. The operation is atomic.
-//!
-//! @param pgv
-//! One of the @[REP.PGVersion]s for the page group.
-//!
-//! @param fields
-//! Versioned fields to set. May be zero to skip this.
-//!
-//! @param page_fields
-//! Can be used to change fields in the pages or delete them. For each
-//! @[REP.Page] in the index, the fields are set according to the
-//! value. The page objects need not belong to the current version
-//! (but the same page must exist there).
-//!
-//! @param remove_pages
-//! If nonzero, then this many pages are removed from the page group.
-//! Pages are always removed from the end according to document order.
-//!
-//! @param add_pages
-//! Use this to add new pages with the given initial values.
-//!
-//! @param unver_fields
-//! Unversioned fields to set.
-//!
-//! @param on_value_error
-//! Passed on to the @expr{on_value_error@} argument in each
-//! @expr{set_fields@} call.
-//!
-//! @returns
-//! Returns the new current page group version. Returns zero iff any
-//! @expr{set_fields@} call returned zero (no change is done in that
-//! case).
-//!
-//! @note
-//! All fields are set using the high-level setters @expr{set_fields@}.
-{
-  // Duplicated from PGVersion.set_fields. Do this before the
-  // TableLock to avoid having to lock page_types and page_status.
-  if (string page_type = fields && m_delete (fields, "page_type"))
-    fields->page_type_id = REP.DB.get_page_type_id (page_type);
-  if (string page_status = fields && m_delete (fields, "page_status"))
-    fields->page_status_id = REP.DB.get_page_status_id (page_status);
-
-  TableLock lock = TableLock (table_locks_for_pgv_and_page_changes);
-
-  return unlocked_set_in_current_pgv (pgv, fields, page_fields, remove_pages,
-                                      add_pages, unver_fields, on_value_error);
-}
-
-REP.PGVersion unlocked_set_in_current_pgv (
-  REP.PGVersion pgv,
-  mapping(string:mixed) fields,
-  void|mapping(REP.Page:mapping(string:mixed)) page_fields,
-  void|int remove_pages,
-  void|array(mapping(string:mixed)) add_pages,
-  void|mapping(string:mixed) unver_fields,
-  void|REP.OnError on_value_error)
-{
-  ASSERT_IF_DEBUG (!fields || zero_type (fields->page_type));
-  ASSERT_IF_DEBUG (!fields || zero_type (fields->page_status));
-
-  REP.PGVersion cur_pgv = pgv->current_pgv();
-  REP.PGVersion infant = low_make_infant_pgv (cur_pgv, 1);
-
-  if (fields && !infant->set_fields (fields, on_value_error))
-    return 0;
-
-  foreach (page_fields || ([]); REP.Page page; mapping(string:mixed) fields) {
-    ASSERT_IF_DEBUG (fields /*for page %O*/, page);
-    if (REP.Page new_page = infant->page_by_id (page->id())) {
-      if (!new_page->set_fields (fields, on_value_error))
-        return 0;
-    }
-    else
-      return REP.raise_err (on_value_error,
-                            "Page %O does not exist in current version %O.\n",
-                            page, cur_pgv);
-  }
-
-  if (remove_pages)
-    infant->remove_last_pages (remove_pages);
-
-  if (add_pages) {
-    if (!infant->add_pages (add_pages, on_value_error))
-      return 0;
-  }
-
-  REP.PGVersion new_pgv = page_versions_table()->low_object_create (infant);
-
-  copy_data_field_placements (cur_pgv, new_pgv);
-
-  // Room for optimization: Combine the db updates made by
-  // set_unver_fields and unlocked_make_pgv_current.
-
-  if (unver_fields &&
-      !new_pgv->set_unver_fields (unver_fields, on_value_error)) {
-    // Let the gc clean up the new pgv.
-    new_pgv->delete(1);
-    return 0;
-  }
-
-  unlocked_make_pgv_current (new_pgv, cur_pgv);
-
-  // Disabled for now. See [Bug 6291].
-  //  cur_pgv->delete(1);
-  return new_pgv;
-}
-
-//! Returns an array of "mapping of text chain properties" for all
-//! text chains for an edition. Intended for e.g. JSON serialization,
-//! to be sent to the InDesign plugin or similar.
-array(mapping(string:mixed))
-ext_text_chains_for_edition (REP.Edition edition)
-{
-  array(mapping(string:mixed)) ext_chains = ({});
-  mapping(string:array(REP.TextFlowLink)) text_chains =
-    edition->get_text_chains();
-
-  foreach (text_chains; string uuid; array(REP.TextFlowLink) tfls) {
-    REP.TextFlowLink first_tfl = sizeof(tfls) && tfls[0];
-    array(REP.Story) stories = first_tfl && first_tfl->stories_in_link();
-
-    mapping(int:int(1..1)) outdated_pgv_ids = ([ ]);
-    foreach (tfls, REP.TextFlowLink tfl) {
-      [int update_type, REP.PGVersion src_pgv,
-       REP.Storage.FileType src_snippet] = tfl->reflow_source();
-      if (update_type == 1) {
-        outdated_pgv_ids[tfl->current_pgv()->id()] = 1;
-      }
-    }
-
-    mapping(string:mixed) entry =
-      ([ "is_rep_text_chain": 1,
-         "uuid": uuid,
-         "stories": map(stories || ({ }),
-                        lambda(REP.Story story) {
-                          //  *** FIXME [JUMPS]: Bad idea to inline story
-                          //      data here?
-                          //      If e.g. title or planned_pageno changes,
-                          //      will we send a push? Client may wish to
-                          //      xref in separate stories table instead.
-                          //
-                          //      We don't push CMT.planner_text_chains
-                          //      on story changes today so title changes
-                          //      are not sent (and possibly neither are
-                          //      appearance changes).
-                          //
-                          //      NOTE: "object_type" and "unique_object_id"
-                          //      are excluded here to ensure a proxy object
-                          //      is created correctly client-side.
-                          mapping story_fields = ([ "story_id": 1,
-                                                    "story_uuid": 1,
-                                                    "story_tmpl_def_id": 1,
-                                                    "story_tmpl_name": 1,
-                                                    "title": 1,
-                                                    "status_level": 1,
-                                                    "story_categories": 1,
-                                                    "jump_title": 1,
-                                                    "date_modified": 1,
-                                                    "item_group": 1,
-                                                    "assignees": 1,
-                                                    "overflows": 1 ]);
-
-                          mapping story_res =
-                            story->rec_from_get_ext(story_fields) +
-                            ([ "content_hash": story->content_hash() ]);
-
-                          //  Collect info about each jump in the chain.
-                          //  This is needed because the user may focus on
-                          //  any of the jumps in Page Composer (when
-                          //  editing the corresponding page).
-                          //
-                          //  We include PGV id and slot name of the slot
-                          //  touched by the story as well as other data
-                          //  related to the snippet.
-                          array(array(mapping)) jump_info = ({ });
-                          foreach (tfls, REP.TextFlowLink tfl) {
-                            if (REP.PageSlot last_ps =
-                                tfl->get_last_page_slot(story)) {
-                              REP.PGVersion pgv = tfl->current_pgv();
-                              int pg_id = pgv->get("page_group_id");
-                              int has_os =
-                                tfl->get("overflow_snippet") ? 1 : 0;
-                              mapping counters =
-                                tfl->get("overflow_counters") || 0;
-                              jump_info += ({
-                                  ([ "pgv_id": pgv->id(),
-                                     "slot_name": last_ps->page_name(),
-                                     "has_overflow_snippet": has_os,
-                                     "overflow_counters": counters ])
-                                });
-                            }
-                          }
-                          if (sizeof(jump_info))
-                            story_res["jump_info"] = jump_info;
-
-                          return story_res;
-                        }),
-         "outdated_pgv_ids": indices(outdated_pgv_ids)
-      ]);
-
-    //  All entries at this point should represent article/body#1 fields
-    //  only. We don't need to list present fields separately.
-    ext_chains += ({ entry });
-  }
-
-  return ext_chains;
-}
-
-
-// Pages
-
-//! Constant mapping to feed to @[TableLock] to lock all tables
-//! required to add page versions and change page assignments to page
-//! slots.
-constant table_locks_for_pgv_and_page_changes = ([
-  // Placement invalidations
-  "ads": READ_LOCK,
-  // Write lock on page_versions for direct changes, and also since
-  // internal_update_pages may cause placeholder pgv's to be created.
-  "page_versions": WRITE_LOCK,
-  // To change cur_pgversion_id.
-  "page_groups": WRITE_LOCK,
-  // For changes in the fields of current pages (when new page
-  // versions are made current).
-  "pages": WRITE_LOCK,
-  // Edition lock necessary for Edition.bump_page_changed.
-  "editions": WRITE_LOCK,
-  // Edition may need to look up its parent Publication.
-  "publications": READ_LOCK,
-  // internal_update_pages may access slots, and create placeholder slots.
-  "page_slots": WRITE_LOCK,
-  // internal_update_pages may remap story appearances.
-  "story_app_parts": WRITE_LOCK,
-  "story_apps": WRITE_LOCK,
-  // is_placeholder called from delete_placeholder_pgv access these tables.
-  "page_categories": READ_LOCK,
-  // The permission check in PGVersion.set_fields needs the page status value.
-  "page_status": READ_LOCK,
-  "stories": READ_LOCK,
-  // copy_data_field_placements may call SIVersion.update_df_placements_cache.
-  "story_items": WRITE_LOCK,
-  // copy_data_field_placements may call REP.DB.siv_by_id.
-  "story_item_versions": READ_LOCK,
-  // PGVersion.set_fields requests a counter number for the
-  // storage counter if a placeholder pgv is created.
-  "counters": WRITE_LOCK,
-  // unlocked_set_in_current_pgv calls copy_data_field_placements.
-  "data_field_placements": WRITE_LOCK,
-  // create_infant calls set_default_user_properties.
-  "user_property_defs": READ_LOCK,
-  // PGVersion may update a bucket owner if storage counter is unchanged
-  "buckets": WRITE_LOCK,
-  // Placement invalidations
-  "bucket_items": WRITE_LOCK,
-]);
-
-//! Constant mapping to feed to @[REP.DB.TableLock] to lock all tables
-//! required for page slot renumbering.
-constant table_locks_for_page_slot_renumber =
-  table_locks_for_pgv_and_page_changes;
-
-REP.Page current_page_by_id (int(1..) page_id,
-                             void|REP.OnError on_rec_not_found)
-//! Returns the page with the given id in a current page group
-//! version.
-{
-  mapping(string:mixed) page_rec =
-    pages_table()->cached_get (page_id, on_rec_not_found);
-  if (!page_rec) return 0;
-  ASSERT_IF_DEBUG (!zero_type (page_rec->page_group_id));
-
-  REP.PGVersion pgv =
-    current_pgv_by_pg_id (page_rec->page_group_id, REP.RETURN_ZERO);
-
-  if (!pgv)
-    return REP.raise_err (on_rec_not_found, "No page with id %d found "
-                          "in a current page version.\n", page_id);
-
-  // If the following doesn't find the page then the pages table is
-  // out of sync with the page records. Should only happen due to
-  // race, and then it's ok to give up.
-  return pgv->page_by_id (page_id, on_rec_not_found);
-}
-
-REP.Page current_page_by_ext_source_id (string ext_source_id,
-                                        void|REP.Edition edition,
-                                        void|REP.OnError on_rec_not_found)
-//! Returns the page with the given external source id (often an UUID)
-//! in a current page group version. If @[edition] is given, the
-//! search is restricted to that edition.
-{
-  REP.CachedTable pages_tbl = pages_table();
-  array(int) res =
-    pages_tbl->select1 ("page_id",
-                        sprintf ("ext_source_id = '%s'",
-                                 pages_tbl->quote (ext_source_id)) +
-                        (edition ?
-                         sprintf (" AND page_slots.edition_id = %d",
-                                  edition->id()) :
-                         ""),
-                        "INNER JOIN page_slots ON "
-                        "(pages.page_slot_id = page_slots.page_slot_id)",
-                        "ORDER BY page_slots.is_deleted ASC");
-  if (!sizeof (res))
-    return REP.raise_err (on_rec_not_found,
-                          "No page with ext_source_id %s found.\n",
-                          ext_source_id);
-
-  return REP.DB.current_page_by_id (res[0], on_rec_not_found);
-}
-
-array(REP.Page) sort_pages_by_page_slot_order (array(REP.Page) pages)
-//! Returns an array that contains the given pages sorted by the order
-//! of their page slots. Assumes that all given pages are bound to
-//! page slots.
-//!
-//! @seealso
-//! @[sort_pages_by_doc_order], @[sort_pages_by_page_order],
-//! @[sort_page_slots_by_order], @[sort_pgvs_by_page_slot_order]
-{
-  ASSERT_IF_DEBUG (!sizeof (pages) ||
-                   !sizeof (pages->pgv()->edition() -
-                            ({pages[0]->pgv()->edition()})));
-
-  array(int) order = pages->page_slot()->get ("page_order");
-  pages += ({});
-  sort (order, pages);
-  return pages;
-}
-
-array(REP.Page) sort_pages_by_doc_order (array(REP.Page) pages)
-//! Returns an array containing the given pages ordered first by
-//! page_group_id and then by their doc_order.
-//!
-//! @seealso
-//! @[sort_pages_by_page_slot_order], @[sort_pages_by_page_order]
-{
-  ASSERT_IF_DEBUG (!sizeof (pages) ||
-                   !sizeof (pages->pgv()->edition() -
-                            ({pages[0]->pgv()->edition()})));
-
-  return Array.sort_array (
-    pages,
-    lambda (REP.Page a, REP.Page b) {
-      int pg_a = a->pgv()->get ("page_group_id");
-      int pg_b = b->pgv()->get ("page_group_id");
-      return pg_a > pg_b || (pg_a == pg_b &&
-                             a->get ("doc_order") > b->get ("doc_order"));
-    });
-}
-
-array(REP.Page) sort_pages_by_page_order (array(REP.Page) pages)
-//! Returns an array containing the given pages ordered by page order:
-//! All pages bound to page slots come first, sorted by
-//! @[sort_pages_by_page_slot_order]. Then comes the remaining pages
-//! sorted by @[sort_pages_by_doc_order].
-{
-  ASSERT_IF_DEBUG (!sizeof (pages) ||
-                   !sizeof (pages->pgv()->edition() -
-                            ({pages[0]->pgv()->edition()})));
-
-  array(REP.Page) bound = ({}), unbound = ({});
-  array(int) bound_order = ({});
-  foreach (pages, REP.Page page) {
-    if (REP.PageSlot slot = page->page_slot()) {
-      bound += ({page});
-      bound_order += ({slot->get ("page_order")});
-    }
-    else
-      unbound += ({page});
-  }
-
-  sort (bound_order, bound);
-
-  if (sizeof (unbound))
-    unbound = sort_pages_by_doc_order (unbound);
-
-  return bound + unbound;
-}
-
-
-// Page slots
-
-Thread.MutexKey page_slot_order_lock (void|int lock_flag,
-                                      void|int no_sql_query_while_locked)
-//! Locks a mutex that covers the page order and page renumbering
-//! related stuff in @[REP.Edition] and @[REP.PageSlot].
-//!
-//! Lock order: Must have a @[TableLock] on
-//! @[table_locks_for_page_slot_renumber] before this one, unless it
-//! is guaranteed that no SQL queries will take place during the scope
-//! of this lock (which is signalled by the
-//! @[no_sql_query_while_locked] argument). The @[TableLock] must
-//! never be locked after this one, regardless of SQL queries (usual
-//! lock order semantics).
-//!
-//! Additional note on lock order: the reason that
-//! @[table_locks_for_page_slot_renumber] must be locked if an SQL
-//! query takes place during the scope of this lock is that a deadlock
-//! might occur otherwise, in the following scenario:
-//!
-//! Thread 1                            Thread 2
-//! Locks TableLock
-//!                                     Locks page_slot_order_lock
-//! Waits for page_slot_order_lock
-//!                                     SQL query on a TableLocked table
-//!
-{
-  ASSERT_IF_DEBUG (no_sql_query_while_locked ||
-                   got_table_lock (table_locks_for_page_slot_renumber));
-  return REP.get_print_module()->page_slot_order_mutex->lock (lock_flag);
-}
-
-Thread.MutexKey page_slot_order_trylock()
-//! Try-lock variant of @[page_slot_order_lock].
-{
-  ASSERT_IF_DEBUG (got_table_lock (table_locks_for_page_slot_renumber));
-  return REP.get_print_module()->page_slot_order_mutex->trylock();
-}
-
-int page_slot_order_is_locked()
-//! Returns true iff the current thread got @[page_slot_order_lock].
-//! Mostly for debug assertions.
-{
-  return
-    REP.get_print_module()->page_slot_order_mutex->current_locking_thread() ==
-    this_thread();
-}
-
-REP.PageSlot page_slot_by_id (int(1..) page_slot_id,
-                              void|REP.OnError on_rec_not_found)
-{
-  return page_slots_table()->object_get (page_slot_id, on_rec_not_found);
-}
-
-REP.Page create_placeholder_pgv (REP.PageSlot slot)
-//! Creates a placeholder page group for the given slot, if it
-//! doesn't have a page assigned already.
-//!
-//! Intended for internal use only; other code can just call
-//! @[REP.PageSlot.page], and it will be created if necessary.
-{
-  ASSERT_IF_DEBUG (slot->id());
-
-  // This lock is heavy artillery, but we'll take it anyway in
-  // make_pgv_current, so now we just do it a bit earlier to fix the
-  // lock order.
-  TableLock lock = TableLock (table_locks_for_pgv_and_page_changes);
-
-  // Lock this mutex to avoid races creating and deleting placeholder
-  // pgv's. Could consider a separate mutex for it, but that'd
-  // introduce tricky lock order issues. Unfortunately that means we
-  // have to allow recursive locking.
-  Thread.MutexKey ps_lock = page_slot_order_lock (2);
-
-  if (REP.Page page = slot->low_get_page())
-    return page;
-
-  REP.PGVersion infant = low_make_infant_pgv (0, 0, slot->edition());
-  infant->add_pages (({(["page_slot_id": slot->id()])}));
-  REP.PGVersion new_pgv = page_versions_table()->low_object_create (infant);
-  REP.Page page = new_pgv->pages()[0];
-
-  make_pgv_current (new_pgv, 0);
-
-#ifdef DEBUG_SLOT_ASSIGNMENT
-  werror ("create_placeholder_pgv for slot %O: %O, page %O\n",
-          slot, new_pgv, page);
-#endif
-  return page;
-}
-
-int delete_placeholder_pgv (REP.PGVersion pgv)
-//! Deletes the given page group iff it is a placeholder according to
-//! @[REP.PGVersion.is_placeholder]. Only intended to be called from
-//! @[REP.Page.low_set_raw].
-//!
-//! @returns
-//! Returns true if the page group got deleted.
-{
-  Thread.MutexKey ps_lock = page_slot_order_lock (2);
-
-  if (!pgv->is_placeholder()) return 0;
-
-#ifdef DEBUG_SLOT_ASSIGNMENT
-  werror ("delete_placeholder_pgv: %O, page%{ %O%}\n", pgv, pgv->pages());
-#endif
-  pgv->set_unver_fields ((["is_deleted": 1]));
-  pgv->delete (1);
-
-  return 1;
-}
-
-
-enum CreateShadowMode {
-  NO_SHADOW = 0,
-  MATCH_SECTION_POS,
-  LAST_IN_SECTION
-};
-
-enum ShadowCopyPolicy {
-  //  No zero value in this enum please
-  DEFAULT_SHADOW_POLICY = 1,
-  PRESERVE_SHADOW_ADS,
-  OVERWRITE_ALL,
-  CLEAR_SHADOW_ADS
-};
-
-protected void update_shadow_pgvs_cb(REP.REPSession ses)
-{
-  Concurrent.Promise p = ses->userdata->update_shadow_promise;
-  mapping(REP.PGVersion:mapping(string|REP.Edition:ShadowCopyPolicy))
-    pgv_queue = ses->userdata->update_shadow_pgvs;
-  if (!pgv_queue || !sizeof(pgv_queue)) {
-    //  Empty array of pages to process
-    p->success( ({ }) );
-    return;
-  }
-
-  //  Each shadow copy operation may update multiple PGV shadows
-  array(Concurrent.Future/*array(REP.PGVersion)*/) futures = ({ });
-  foreach (pgv_queue; REP.PGVersion pgv;
-           mapping(string|REP.Edition:ShadowCopyPolicy) dst_editions) {
-    Concurrent.Future f =
-      pgv->update_shadowed_slots(mappingp(dst_editions) && dst_editions);
-    futures += ({ f });
-  }
-
-  //  Clear session so we don't capture it in the lambda below
-  ses = 0;
-
-  //  Collect all new PGVs when IDS processing finishes
-  Concurrent.results(futures)->
-    flat_map(lambda(array(array(REP.PGVersion)) res) {
-        array(REP.PGVersion) new_pgvs = Array.flatten(res);
-        p->success(new_pgvs);
-
-        //  Return value not used but needed to avoid internal error
-        return Concurrent.resolve(0);
-      });
-}
-
-
-Concurrent.Future/*array(REP.PGVersion)*/
-queue_update_shadow_pgvs(array(REP.PGVersion) pgvs,
-                         void|multiset(REP.Edition)|
-                         mapping(string|REP.Edition:ShadowCopyPolicy)
-                           dst_editions)
-{
-  //  Don't copy deleted PGVs or where all slots are deleted. We also
-  //  verify Z/E collection since that is a requirement for shadowing.
-  pgvs = filter(pgvs, lambda(REP.PGVersion pgv) {
-      return
-        pgv->edition()->is_ze_edition() &&
-        pgv->is_placed();
-    });
-  if (!sizeof(pgvs))
-    return Concurrent.resolve( ({ }) );
-
-  //  In order to avoid redundant shadow updates of the same PGV across
-  //  different slots we accumulate all requests in a session callback.
-  //
-  //  We'll merge a list of editions to target if that is given with
-  //  potentially unique policies per copy. If no edition list is given
-  //  we'll flag "*" in our queue as placeholder for also copying to any
-  //  linked edition.
-  REP.REPSession ses = REP.get_session();
-  mapping ud = ses->userdata;
-  if (!ud->update_shadow_pgvs)
-    ud->update_shadow_pgvs = ([ ]);
-  mapping(REP.PGVersion:mapping(string|REP.Edition:ShadowCopyPolicy))
-    ud_queue = ud->update_shadow_pgvs;
-
-  if (!dst_editions)
-    dst_editions = ([ "*": DEFAULT_SHADOW_POLICY ]);
-  else if (multisetp(dst_editions)) {
-    dst_editions =
-      mkmapping(indices(dst_editions),
-                ({ DEFAULT_SHADOW_POLICY }) * sizeof(dst_editions));
-  }
-
-  ASSERT_IF_DEBUG(mappingp(dst_editions));
-
-  foreach (pgvs, REP.PGVersion pgv) {
-    ud_queue[pgv] = (ud_queue[pgv] || ([ ]) ) + dst_editions;
-  }
-
-  //  Reuse existing promise or create a new one if none is found
-  ud->update_shadow_promise =
-    ud->update_shadow_promise ||
-    Concurrent.Promise();
-
-  ses->register_uniq_session_done_callback(update_shadow_pgvs_cb);
-  return ud->update_shadow_promise->future();
-}
-
-
-REP.PageSlot find_next_shadow_parent_sibling(REP.PageSlot shadow_ps)
-{
-  //  For a shadowed slot, try to see if it's part of a PGV where the
-  //  top parent Z/E has a next sibling. If so, return it.
-  //
-  //  The reason top parent and not closest parent is used is that an
-  //  intermediate zone may have deleted that shadowed slot and thus
-  //  hides the link to the slot we expect to find.
-  if (REP.PageSlot parent_ps = shadow_ps->shadow_top_parent()) {
-    if (REP.Page parent_p = parent_ps->low_get_page()) {
-      array(REP.PageSlot) parent_pss =
-        parent_p->pgv()->pages()->page_slot() - ({ 0 });
-      int parent_ps_idx = search(parent_pss, parent_ps);
-      if ((parent_ps_idx >= 0) &&
-          (parent_ps_idx < (sizeof(parent_pss) - 1))) {
-        return parent_pss[parent_ps_idx + 1];
-      }
-    }
-  }
-  return UNDEFINED;
-}
-
-
-REP.PageSlot find_next_shadow_sibling(REP.PageSlot shadow_ps)
-{
-  //  For a shadowed slot, try to see if it's part of a PGV where the
-  //  top parent Z/E has a next sibling with a shadow in our section.
-  //
-  //  This is used when page groups are extended (e.g. multi-page files
-  //  are uploaded or when pages are added directly in InDesign), or other
-  //  actions such as join.
-  if (REP.PageSlot parent_next_ps =
-      find_next_shadow_parent_sibling(shadow_ps)) {
-    //  We have found the next sibling slot in the parent PGV. Now see if
-    //  that has a shadow slot in our current edition.
-    array(REP.PageSlot) cand_pss = parent_next_ps->shadowed_slots(true);
-    REP.Edition shadow_ed = shadow_ps->edition();
-    REP.Edition.Section shadow_section = shadow_ps->section();
-    foreach (cand_pss, REP.PageSlot cand_ps) {
-      if ((cand_ps->edition() == shadow_ed) &&
-          (cand_ps->section() == shadow_section)) {
-        //  Found a match!
-        return cand_ps;
-      }
-    }
-  }
-  return UNDEFINED;
-}
-
-
-array(REP.PageSlot) unlocked_create_shadow_slots(REP.PageSlot parent_ps,
-                                                 CreateShadowMode
-                                                   create_shadow_mode)
-{
-  //  Collect all transitive edition branches and create all slots at once.
-  //  Locked editions need to be ignored, and shadows that would have been
-  //  linked there instead have to be linked to the closest unlocked parent
-  //  in the graph.
-  //
-  //  We offer two strategies for where new slots are placed:
-  //
-  //    MATCH_SECTION_POS:
-  //
-  //      Finds the same section (by ref or marker) in the branched editions
-  //      and then looks for identical prev/next slot names to match the
-  //      position. We don't use slot index since the branches could have
-  //      different section size.
-  //
-  //      We could theoretically identify the given slot's before and/or
-  //      after sibling and trace their shadow graphs to find corresponding
-  //      locations in the branched editions, but that is risky given that
-  //      some slots may have been unlinked. Instead we use a strategy based
-  //      on section and page name of prev/next slot.
-  //
-  //    LAST_IN_SECTION:
-  //
-  //      This strategy simply adds the shadow slots last in the matching
-  //      section.
-  REP.Edition parent_ed = parent_ps->edition();
-  if (!parent_ed->is_ze_edition() || parent_ps->get("is_deleted"))
-    return 0;
-
-  //  Build lookup table of the Z/E graph
-  array(REP.Edition) ze_coll = parent_ed->ze_collection();
-  mapping(int:array(REP.Edition)) ze_children = ([ ]);
-  foreach (ze_coll, REP.Edition ze_ed) {
-    if (int ze_parent_id = ze_ed->get("ze_parent_edition_id"))
-      ze_children[ze_parent_id] += ({ ze_ed });
-  }
-
-  //  Returns a tuple < section, after_slot > for use in placing a new slot
-  //  in the given edition. The parent slot will point to a different (parent)
-  //  edition and is used to identify the section and neighboring slots.
-  array(REP.Edition.Section|REP.PageSlot)
-  find_after_slot(REP.PageSlot parent_ps, REP.Edition shadow_ed) {
-    //  Get parent slot's section reference (if any) and map to counterpart
-    //  in the current edition.
-    REP.Edition.Section shadow_section;
-    if (!shadow_ed->has_fallback_section() &&
-        !parent_ps->edition()->has_fallback_section()) {
-      //  Only if both editions use proper sections is there a point to map
-      //  from one to the other.
-      REP.Edition.SectionDef parent_section_def = parent_ps->section_def();
-      shadow_section = shadow_ed->get_section_by_ref(parent_section_def->ref());
-      if (!shadow_section) {
-        //  Couldn't find match using ref field so try the section marker
-        string parent_section_marker = parent_section_def->marker();
-        foreach (shadow_ed->all_sections(),
-                 REP.Edition.Section cand_shadow_section) {
-          if (cand_shadow_section->def()->marker() == parent_section_marker) {
-            shadow_section = cand_shadow_section;
-            break;
-          }
-        }
-      }
-    }
-    if (!shadow_section)
-      shadow_section = shadow_ed->main_section();
-
-    array(REP.PageSlot) cand_pss = shadow_section->page_slots();
-    if (!sizeof(cand_pss))
-      return ({ shadow_section, 0 });
-
-    switch (create_shadow_mode) {
-    case LAST_IN_SECTION:
-      return ({ shadow_section, cand_pss[-1] });
-
-    case MATCH_SECTION_POS:
-      //  Try to match the parent slot's page name and relative position
-      //  within its section.
-      array(REP.PageSlot) parent_pss = parent_ps->section()->page_slots();
-      array(string) parent_pss_names = parent_pss->page_name();
-      array(string) cand_pss_names = cand_pss->page_name();
-      int parent_ps_idx = search(parent_pss, parent_ps);
-
-      ASSERT_IF_DEBUG(parent_ps_idx >= 0);
-
-      if (parent_ps_idx > 0) {
-        //  Match preceding slot
-        int shadow_prev_idx =
-          search(cand_pss_names, parent_pss_names[parent_ps_idx - 1]);
-        if (shadow_prev_idx >= 0) {
-          return ({ shadow_section, cand_pss[shadow_prev_idx] });
-        }
-
-        //  Match following slot
-        if (parent_ps_idx < (sizeof(parent_pss) - 1)) {
-          int shadow_next_idx =
-            search(cand_pss_names, parent_pss_names[parent_ps_idx + 1]);
-          if (shadow_next_idx > 0)
-            return ({ shadow_section, cand_pss[shadow_next_idx - 1] });
-        }
-
-        //  Cannot match so place last in section
-        return ({ shadow_section, cand_pss[-1] });
-      } else if (parent_ps_idx == 0) {
-        //  First in section so fallback is ok
-      }
-      break;
-
-    default:
-      error("Unknown shadow slot placement strategy: " + create_shadow_mode);
-    }
-
-    return ({ shadow_section, 0 });
-  };
-
-  REP.PageSlot create_shadow(REP.PageSlot parent_slot, REP.Edition shadow_ed) {
-    //  Identify section and best position where the new slot should be
-    //  inserted.
-    [ REP.Edition.Section shadow_section, REP.PageSlot after_ps ] =
-      find_after_slot(parent_slot, shadow_ed);
-    mapping(string:mixed) fields = ([
-      "after_slot": after_ps,
-      "shadow_parent_id": parent_slot->id()
-    ]);
-    REP.PageSlot shadow_ps =
-      unlocked_create_page_slot(shadow_section, fields, REP.RETURN_ZERO, false);
-    return shadow_ps;
-  };
-
-  void recurse_link_from(REP.Edition parent_ed, REP.PageSlot parent_ps) {
-    //  Create links to all editions that branch from the parent edition
-    foreach (ze_children[parent_ed->id()] || ({ }), REP.Edition shadow_ed) {
-      //  If the target edition is unlocked a new slot should be created and
-      //  act as the new parent slot for further recursion. When the edition
-      //  is locked we pass our current parent slot instead.
-      bool ed_locked = shadow_ed->get("is_locked");
-      REP.PageSlot shadow_ps =
-        !ed_locked &&
-        create_shadow(parent_ps, shadow_ed);
-      recurse_link_from(shadow_ed, shadow_ps || parent_ps);
-    }
-  };
-
-  //  Generate the links
-  recurse_link_from(parent_ed, parent_ps);
-}
-
-
-REP.PageSlot create_page_slot (REP.Edition|REP.Edition.Section ed_or_sec,
-                               mapping(string:mixed) fields,
-                               void|REP.OnError on_value_error,
-                               void|CreateShadowMode create_shadow_mode)
-//! Creates a page slot (together with a placeholder page group) in
-//! the given edition. @[fields] contains the initial values for the
-//! record fields.
-{
-  // FIXME: Flag to delay creating the placeholder, if the caller
-  // already has a page to put in the slot.
-
-  // Note code dup in create_page_slots() and copy_page_slot().
-
-  // Heavy lock which we have to take here to ensure lock order. It
-  // may otherwise be taken from unlocked_create_page_slot ->
-  // internal_update_page_order_cache -> fix_slot_numbering.
-  TableLock lock = TableLock (table_locks_for_pgv_and_page_changes);
-
-  // page_slot_order_lock is necessary to ensure that the page_order
-  // calculated in the PageSlot.set_fields call is still valid in the
-  // later commit.
-  Thread.MutexKey ps_lock = page_slot_order_lock();
-
-  return unlocked_create_page_slot (ed_or_sec, fields, on_value_error,
-                                    create_shadow_mode);
-}
-
-REP.PageSlot unlocked_create_page_slot (REP.Edition|REP.Edition.Section
-                                          ed_or_sec,
-                                        mapping(string:mixed) fields,
-                                        void|REP.OnError on_value_error,
-                                        void|CreateShadowMode
-                                          create_shadow_mode)
-{
-  REP.Edition edition =
-    ed_or_sec->is_rep_section ? ed_or_sec->edition() : ed_or_sec;
-  REP.Edition.Section section =
-    ed_or_sec->is_rep_section ? ed_or_sec : edition->main_section();
-
-  ASSERT_IF_DEBUG (edition->id());
-  ASSERT_IF_DEBUG (section);
-
-  if (edition->get("is_locked"))
-    return 0;
-
-  fields->edition_id = edition->id();
-  fields->section_id = section->id();
-  REP.PageSlot slot =
-    page_slots_table()->object_create (fields, on_value_error);
-  if (slot) {
-    section->internal_update_page_order_cache (slot);
-    create_placeholder_pgv (slot);
-
-    if (create_shadow_mode && edition->is_ze_edition())
-      unlocked_create_shadow_slots(slot, create_shadow_mode);
-  }
-  return slot;
-}
-
-array(REP.PageSlot) create_page_slots(REP.Edition|REP.Edition.Section ed_or_sec,
-                                      void|int(1..) num_pages,
-                                      void|REP.PageSlot after_slot,
-                                      void|CreateShadowMode create_shadow_mode)
-//! Create new slots in an edition. Optionally at a given position in the
-//! edition.
-//!
-//! @param ed_or_sec
-//!    The @[REP.Edition] or @[REP.Edition.Section] in which to create the
-//!    new slots. If section isn't given it implies the main section.
-//! @param num_pages
-//!    Optional number of pages to add. Defaults to 1.
-//! @param after_slot
-//!    Optional position argument where pages are to be added. If this and
-//!    section both are specified the slot must be part of the given section.
-{
-  array(REP.PageSlot) res = ({ });
-  mapping(string:mixed) slot_fields = ([ ]);
-  if (!zero_type(after_slot))
-    slot_fields += ([ "after_slot" : after_slot ]);
-
-  //  Use same lock as create_page_slot() and call the unlocked version in
-  //  the loop. See the function above for comments.
-  TableLock lock = TableLock (table_locks_for_pgv_and_page_changes);
-  Thread.MutexKey ps_lock = page_slot_order_lock();
-
-  num_pages = num_pages || 1;
-  for(; num_pages > 0; num_pages--) {
-    after_slot = unlocked_create_page_slot(ed_or_sec, slot_fields + ([ ]),
-                                           0, create_shadow_mode);
-    slot_fields->after_slot = after_slot;
-    res += ({ after_slot });
-  }
-  return res;
-}
-
-REP.PGVersion copy_page_into(REP.PageSlot src_slot, REP.PageSlot dst_slot)
-{
-  if (src_slot->is_empty())
-    return 0;		// Got nothing to copy
-
-  REP.Page src_page = src_slot->page();
-  REP.PGVersion src_pgv = src_page->pgv();
-  REP.PGVersion dst_pgv = dst_slot->page()->pgv();
-  REP.PGVersion new_pgv;
-
-  mapping(string:mixed) changed_fields = ([ ]);
-  string comment =
-    "Copied from " +
-    (src_pgv->edition()->get ("title") || "nameless issue") +
-    ", page " + src_slot->page_name();
-
-  if (sizeof (src_pgv->pages()) == sizeof (dst_pgv->pages())) {
-    // If the source and dest page groups have the same number
-    // of pages, we'll avoid splitting the source to allow
-    // copying of e.g. spread documents. In the long run we
-    // should probably have some kind of marker/flag that can
-    // be used in template documents to instruct the system
-    // that a spread is in fact a spread. Also, there is no
-    // way to drag and drop a spread onto an empty page slot
-    // currently (since the single page will be extracted
-    // then.
-    new_pgv =
-      REP.DB.copy_page_group (src_pgv, dst_slot->edition(), 0, changed_fields);
-    array(REP.PageSlot) slots = dst_pgv->pages()->page_slot() - ({ 0 });
-
-    REP.DB.assign_pgv_to_slots (new_pgv, slots);
-    new_pgv = REP.DB.add_pgv (new_pgv, 1, ([ "comment": comment ]) );
-    REP.DB.make_pgv_current (new_pgv);
-  } else {
-    // FIXME: Copy spreads from template issues: In a template
-    // issue we typically got many template pages, and some
-    // should be kept together as spreads. Should have a flag
-    // for that and then a way to keep the spreads together.
-    string page_file_path = src_page->get_split_layout_filepath (1);
-    if (!page_file_path) {
-      report_warning ("Failed to retrieve split layout file for %O.\n",
-                      src_page);
-      return 0;
-    }
-
-    if (!dst_pgv->is_placeholder() && sizeof (dst_pgv->pages()) == 1) {
-      // Make a new version on the existing page group.
-      new_pgv = REP.DB.add_pgv (dst_pgv, 0, ([ "comment": comment ]) );
-    } else {
-      new_pgv = REP.DB.copy_page_group_fields (src_pgv,
-                                               dst_slot->edition(),
-                                               0,
-                                               changed_fields,
-                                               REP.THROW_RXML);
-
-      REP.DB.assign_pgv_to_slots (new_pgv, ({ dst_slot }));
-      new_pgv = REP.DB.add_pgv (new_pgv, 0, (["comment": comment]));
-    }
-
-    string base_db_path = REP.Storage.file_db_path();
-
-    void finish_page_file_copy(int(0..0)|string page_file_path) {
-      if (!new_pgv || !page_file_path || (page_file_path == "")) {
-        //  Split failed so clean up
-        new_pgv->delete(1);
-        report_error ("Unable to get split layout file for %O.\n", src_page);
-        new_pgv = 0;
+      if (!val) {
         return;
       }
 
-      array(REP.Page) dst_pages = new_pgv->pages();
-      mapping(string:mixed) src_page_rec =
-        src_page->get_rec() &
-        ({ "description",
-           "ext_source_id" });
-      if (REP.Page dst_page = sizeof (dst_pages) && dst_pages[0]) {
-        dst_page->set_fields (src_page_rec);
+      string|array(string) key_frag;
+      if (stringp(val)) {
+        key_frag = id->request_headers[val];
       } else {
-        new_pgv->add_pages ( ({ src_page_rec }) );
+        key_frag = val(url, id);
       }
-      new_pgv->store_file_by_copy (base_db_path + page_file_path,
-                                   REP.Storage.UNPROC_LAYOUT_FILE,
-                                   src_pgv->layout_mime_type(), 0, 0,
-                                   // FIXME: Not quite a
-                                   // verbatim source..
-                                   src_pgv);
-
-      REP.DB.copy_stories_between_page_groups (src_pgv, new_pgv);
-      REP.DB.make_pgv_current(new_pgv);
-    };
-
-    if (page_file_path == "")
-      // Wait for the page extraction to complete. Do this
-      // after creating the new pgv to avoid returning the
-      // preview for the old one while we wait on this. We'll
-      // specify a 10 second timeout to avoid stalling handler
-      // threads for too long if there's a huge InDesign
-      // backlog. In that case the finish_page_file_copy
-      // callback will be called when the operation completes
-      // (which in turn will trigger a push notification to
-      // clients, if enabled).
-      page_file_path =
-        src_page->get_split_layout_filepath (3, finish_page_file_copy, 10);
-
-    if (page_file_path) {
-      if (sizeof (page_file_path)) {
-        // We got the split file already. Otherwise
-        // src_page->get_split_layout_filepath will take care
-        // to call the callback when it's completed.
-        finish_page_file_copy (page_file_path);
-      }
-    } else {
-      new_pgv->delete (1);
-      report_error ("Unable to get split layout file for %O.\n", src_page);
-      new_pgv = 0;
+      if (key_frag)
+        // Avoid spoofing if key_frag happens to contain "\0\0".
+        key_frag = replace (key_frag, "\0", "\0\1");
+      else key_frag = "";
+      key_prefix += "\0\0" + key_frag;
     }
   }
 
-  return new_pgv;
-}
-
-REP.PageSlot copy_page_slot (REP.PageSlot src_slot,
-                             void|mapping(string:mixed) field_overrides,
-                             void|REP.OnError on_value_error)
-//! Creates a new page slot by copying all fields from the given one.
-//! The new slot is ordered after the given one. @[field_overrides]
-//! may then be given to specify other values for selected fields.
-{
-  // Note code dup in create_page_slot() and create_page_slots().
-  TableLock lock = TableLock (table_locks_for_pgv_and_page_changes);
-  Thread.MutexKey ps_lock = page_slot_order_lock();
-  return unlocked_copy_page_slot (src_slot, field_overrides, on_value_error);
-}
-
-REP.PageSlot unlocked_copy_page_slot (REP.PageSlot src_slot,
-                                      void|mapping(string:mixed) fields,
-                                      void|REP.OnError on_value_error)
-{
-  fields =
-    (src_slot->get_rec() -
-     ({ "page_slot_id", "edition_id", "calc_page_no", "section_id",
-        "shadow_parent_id" }) ) +
-    (fields || ([]));
-  return unlocked_create_page_slot (src_slot->section(), fields,
-                                    on_value_error);
-}
-
-REP.PageSlot create_empty_padding_slot (REP.PageSlot after_slot,
-                                        REP.Edition|REP.Edition.Section ed_or_sec,
-                                        int page_order,
-                                        int calc_page_no)
-//! Creates an empty slot (together with a placeholder page group) to
-//! be used for padding to reach a required page position. The slot is
-//! inserted after @[after_slot]. If @[after_slot] is zero then the
-//! slot is inserted first in @[ed_or_sec].
-//!
-//! @note
-//! Only to be used from the repagination functions in @[REP.Edition]
-//! - assumes @[page_slot_order_is_locked].
-{
-  ASSERT_IF_DEBUG (page_slot_order_is_locked());
-
-  REP.Edition edition =
-    ed_or_sec->is_rep_section ? ed_or_sec->edition() : ed_or_sec;
-  REP.Edition.Section section =
-    ed_or_sec->is_rep_section ? ed_or_sec : edition->main_section();
-
-  ASSERT_IF_DEBUG (edition->id());
-  ASSERT_IF_DEBUG (section);
-
-  REP.ObjectTable ps_tbl = page_slots_table();
-  REP.PageSlot infant = ps_tbl->create_infant();
-
-  // Could use after_slot as a template here for inheriting properties
-  // for the new slot.
-
-  // Since we're called from inside Edition.fix_slot_numbering etc,
-  // use the special low-level setter to avoid recursive
-  // invalidations.
-  infant->internal_update_page_fields ((["edition_id": edition->id(),
-                                         "section_id": section->id(),
-                                         "page_order": page_order,
-                                         "calc_page_no": calc_page_no]));
-
-  REP.PageSlot new_slot = ps_tbl->low_object_create (infant);
-
-  create_placeholder_pgv (new_slot);
-  return new_slot;
-}
-
-//  // Enable this debug by default.
-//  #define DEBUG_SHUFFLE_PAGES_IN_SLOTS
-//
-//  int(0..1) shuffle_pages_in_slots (
-//    mapping(REP.PageSlot:REP.PageSlot) assignments,
-//    void|REP.OnError on_move_locked)
-//  //! Shuffles around the pages between the page slots in an edition. No
-//  //! placeholder pgvs are created or deleted in the process.
-//  //!
-//  //! For each element in @[assignments], the page currently assigned to
-//  //! the @[REP.PageSlot] in the value gets assigned to the page slot in
-//  //! the index.
-//  //!
-//  //! If, after those assignments, there are pages without slots and
-//  //! slots without pages then the pages in other slots are shifted,
-//  //! without changing their order wrt each other, as necessary to fill
-//  //! gaps and make room so that every page ends up in a slot
-//  //! afterwards.
-//  //!
-//  //! Page slots with move locks are not affected. If any page slot
-//  //! mentioned in @[assignments] is move locked then it is an error
-//  //! that is handled according to @[on_move_locked].
-//  //!
-//  //! The changes are done in the current pgv's of all affected page
-//  //! groups.
-//  //!
-//  //! @note
-//  //! The shuffling only applies to undeleted page slots in the edition.
-//  {
-//    if (!sizeof (assignments)) return 0;
-//
-//    // Disallow other REP sessions while performing this
-//    // operation. Apparently, various race problems may occur otherwise,
-//    // despite table_locks_for_pgv_and_page_changes being held.
-//    // Some of the races observed include:
-//    //
-//    // - Multiple records in the pages table having identical
-//    // page_slot_id (allowed by DB design but not supported in higher
-//    // level layers nor the GUI.) (Original issue seen in RT #21777.)
-//    //
-//    // - Page slots missing a corresponding page record (allowed by DB
-//    // design but not supported due to missing scratch area -
-//    // placeholders should always be present to avoid page listing
-//    // breakage).
-//    //
-//    // - PGVersions being added before page slot shuffling but made
-//    // current after shuffling is finished, which will commit old pages
-//    // to page slot mappings -- effectively reverting the finished move
-//    // operation.
-//
-//    REP.ExclusiveSessionTracker est = REP.ExclusiveSessionTracker();
-//
-//  #ifdef DEBUG_SHUFFLE_PAGES_IN_SLOTS
-//    ASSERT (sizeof (Array.uniq (values (assignments))) ==
-//  	  sizeof (assignments));
-//  #endif
-//
-//    // Need to lock all these tables since
-//    // PGVersion.internal_update_pages gets called at the end.
-//    TableLock lock = TableLock (table_locks_for_pgv_and_page_changes);
-//
-//    {
-//      mapping(REP.PageSlot:int(1..1)) unassigned_slots = ([]);
-//      mapping(REP.PageSlot:int(1..1)) unassigned_pages = ([]);
-//
-//      REP.Edition ed = get_iterator (assignments)->index()->edition();
-//
-//      foreach (assignments; REP.PageSlot tgt; REP.PageSlot src) {
-//  #ifdef DEBUG_SHUFFLE_PAGES_IN_SLOTS
-//        ASSERT (tgt->edition() == ed);
-//        ASSERT (src->edition() == ed);
-//        ASSERT (!tgt->get ("is_deleted"));
-//        ASSERT (!src->get ("is_deleted"));
-//  #endif
-//        if (tgt->get ("is_move_locked"))
-//  	return REP.raise_err (on_move_locked, "Cannot assign page to "
-//  			      "move locked page slot %s.\n", tgt->page_name());
-//        if (src->get ("is_move_locked"))
-//  	return REP.raise_err (on_move_locked, "Cannot assign page from "
-//  			      "move locked page slot %s.\n", src->page_name());
-//        if (tgt != src) {
-//  	if (!m_delete (unassigned_slots, tgt))
-//  	  unassigned_pages[tgt] = 1;
-//  	if (!m_delete (unassigned_pages, src))
-//  	  unassigned_slots[src] = 1;
-//        }
-//      }
-//
-//  #ifdef DEBUG_SHUFFLE_PAGES_IN_SLOTS
-//      ASSERT (sizeof (unassigned_slots) == sizeof (unassigned_pages));
-//      ASSERT (!sizeof (unassigned_slots & unassigned_pages));
-//  #endif
-//
-//      if (sizeof (unassigned_slots)) {
-//        array(REP.PageSlot) slots = ed->page_slots();
-//        array(REP.PageSlot) back_queue = ({}), forw_queue = ({});
-//
-//        foreach (slots; int i; REP.PageSlot slot)
-//  	if (!slot->get ("is_deleted")) {
-//  	  int feed, drain;
-//  	  if (unassigned_pages[slot])
-//  	    feed = 1;
-//  	  else if (unassigned_slots[slot])
-//  	    drain = 1;
-//  	  else if (!assignments[slot] &&
-//  		   (sizeof (back_queue) || sizeof (forw_queue)) &&
-//  		   !slot->get ("is_move_locked"))
-//  	    feed = drain = 1;
-//
-//  	  if (feed) {
-//  	    if (sizeof (back_queue)) {
-//  	      assignments[back_queue[0]] = slot;
-//  	      back_queue = back_queue[1..];
-//  	    }
-//  	    else
-//  	      forw_queue += ({slot});
-//  	  }
-//
-//  	  if (drain) {
-//  	    if (sizeof (forw_queue)) {
-//  	      assignments[slot] = forw_queue[0];
-//  	      forw_queue = forw_queue[1..];
-//  	    }
-//  	    else
-//  	      back_queue += ({slot});
-//  	  }
-//  	}
-//
-//  #ifdef DEBUG_SHUFFLE_PAGES_IN_SLOTS
-//        ASSERT_IF_DEBUG (!sizeof (back_queue /*%O*/), back_queue);
-//        ASSERT_IF_DEBUG (!sizeof (forw_queue /*%O*/), forw_queue);
-//  #endif
-//      }
-//
-//  #ifdef DEBUG_SHUFFLE_PAGES_IN_SLOTS
-//      // Sanity check that every involved slot both gets rid of its old
-//      // page and gets a new one.
-//      mapping(REP.PageSlot:int) check = ([]);
-//      foreach (assignments; REP.PageSlot tgt; REP.PageSlot src) {
-//        check[tgt] |= 1;
-//        check[src] |= 2;
-//      }
-//      ASSERT (!sizeof (values (check /*%O*/) - ({3}))
-//  	    /*assignments: %O*/, check, assignments);
-//  #endif
-//    }
-//
-//    REP.CachedTable pages_tbl = pages_table();
-//    mapping(REP.PGVersion:REP.DBObject.DisableAutoCommit) page_group_dacs = ([]);
-//    mapping(REP.Page:REP.PageSlot) page_assignments = ([]);
-//
-//    foreach (assignments; REP.PageSlot tgt; REP.PageSlot src)
-//      if (REP.Page page = src->low_get_page()) {
-//        page_assignments[page] = tgt;
-//        REP.PGVersion pgv = page->pgv();
-//        if (!page_group_dacs[pgv])
-//  	page_group_dacs[pgv] = pgv->DisableAutoCommit();
-//      }
-//
-//    // Note that the page slot assignments are not logically part of the
-//    // versioned info in the PGVersions (even though they currently get
-//    // stored in old pgv's). Therefore we don't need to add new pgv's
-//    // here.
-//
-//    foreach (page_assignments; REP.Page page; REP.PageSlot new_slot)
-//      page->set_fields ((["page_slot": new_slot]));
-//
-//    // Update the table directly before the page groups are committed,
-//    // so that PGVersion.internal_update_pages won't notice the change
-//    // and start juggling with placeholders.
-//    foreach (page_assignments; REP.Page page; REP.PageSlot new_slot) {
-//  #ifdef DEBUG_SHUFFLE_PAGES_IN_SLOTS
-//      ASSERT (page->pgv() == page->pgv()->current_pgv());
-//  #endif
-//      pages_tbl->cached_update ((["page_id": page->id(),
-//  				"page_slot_id": new_slot->id()]));
-//    }
-//
-//    // Explicit destructs for explicitness sake..
-//    foreach (page_group_dacs;; REP.DBObject.DisableAutoCommit dac)
-//      destruct (dac);
-//    destruct (lock);
-//
-//    destruct (est);
-//
-//    return 1;
-//  }
-
-int(0..1) reorder_page_slots (array(REP.PageSlot) slot_order,
-                              void|REP.OnError on_move_locked)
-//! Rearranges the given page slots so that they get in the given
-//! order relative to each other. If there are more page slots between
-//! those then they end up afterwards, except those with move locks
-//! which stay where they are.
-//!
-//! Tries to keep together "sibling" slots, i.e. those that share
-//! page_order number: If siblings occur next to each other in page
-//! order in @[slot_order] then they are kept siblings, and if there
-//! are siblings among other slots not included in @[slot_order], they
-//! are kept siblings as well.
-//!
-//! If any page slot in @[slot_order] except the first is move locked,
-//! or any sibling of them, then it is an error that is handled
-//! according to @[on_move_locked].
-{
-  if (!sizeof (slot_order)) return 1;
-
-  ASSERT_IF_DEBUG (sizeof (Array.uniq (slot_order)) == sizeof (slot_order));
-  ASSERT_IF_DEBUG (sizeof (Array.uniq (slot_order->section()->id())) == 1);
-
-  REP.PageSlot first = slot_order[0];
-
-  // Save the siblings for each slot. Let's also keep track of deleted ones.
-  mapping(REP.PageSlot:array(REP.PageSlot)) siblings =
-    mkmapping (slot_order, slot_order->siblings (1));
-
-  // First remove siblings that should be kept siblings. It's enough
-  // to keep one of them and let the sibling handling below update the
-  // other ones.
-  array(REP.PageSlot) later = ({});
-  REP.PageSlot prev_slot = first;
-  int prev_po = prev_slot->get ("page_order");
-
-  for (int i = 1; i < sizeof (slot_order); i++) {
-    REP.PageSlot slot = slot_order[i];
-    ASSERT_IF_DEBUG (slot->edition() == first->edition());
-    ASSERT_IF_DEBUG (!slot->get ("is_deleted"));
-
-    foreach (({slot}) + siblings[slot], REP.PageSlot check_slot)
-      if (check_slot->get ("is_move_locked") &&
-          !check_slot->get ("is_deleted"))
-        return REP.raise_err (on_move_locked, "Attempt to move page slot %s "
-                              "which is move locked.\n",
-                              check_slot->page_name());
-
-    int po = slot->get ("page_order");
-    if (po != prev_po || slot < prev_slot) {
-      later += ({slot});
-      prev_slot = slot;
-      prev_po = po;
-    }
-  }
-
-  TableLock lock = TableLock (table_locks_for_page_slot_renumber);
-  REP.Edition.DelayPageSlotRenumber dpsr =
-    first->edition()->DelayPageSlotRenumber();
-
-  // Now reorder each slot after the previous one, and let the
-  // siblings tag along.
-  prev_slot = first;
-  foreach (later, REP.PageSlot slot) {
-    slot->set_fields ((["after_slot": prev_slot]));
-    int po = slot->get ("page_order");
-    foreach (siblings[slot], REP.PageSlot sibling)
-      // May have deleted move locked slots here. Just ignore them.
-      if (!sibling->get ("is_move_locked"))
-        sibling->set_fields ((["page_order": po]));
-    prev_slot = slot;
-  }
-
-  destruct (dpsr);
-  destruct (lock);
-
-  return 1;
-}
-
-array(REP.PageSlot) sort_page_slots_by_order (array(REP.PageSlot) slots)
-//! Returns an array that contains the given page slots sorted by
-//! page_order.
-//!
-//! @seealso
-//! @[sort_pages_by_page_slot_order]
-{
-  ASSERT_IF_DEBUG (!sizeof (slots) ||
-                   !sizeof (slots->edition() - ({slots[0]->edition()})));
-  array(int) slots_order = slots->get ("page_order");
-  slots += ({});
-  sort (slots_order, slots);
-  return slots;
-}
-
-
-array(mapping) get_edition_page_groups_info(REP.Edition ed)
-{
-  // Iterate over the page groups in page slot order.
-  array(mapping(string:mixed)) pg_recs = ({ });
-  mapping(REP.PGVersion:int(1..1)) added = ([ ]);
-  foreach (ed->page_slots(0), REP.PageSlot slot) {
-    REP.PGVersion pgv = slot->page()->pgv();
-    if (!added[pgv]) {
-      // Misses in the added mapping are possible due to races
-      // where a new pgv has become current, but that's no biggie.
-      added[pgv] = 1;
-      array(REP.PageSlot) slots = pgv->pages()->page_slot() - ({ 0 });
-      pg_recs += ({
-          ([ "page_group_id": pgv->get("page_group_id"),
-             "group_name": REP.Utils.group_page_nums(slots->page_name()),
-             "section_id": sizeof(slots) && slots[0]->section()->id() ])
-        });
-    }
-  }
-
-  return pg_recs;
-}
-
-//! Copies all @[REP.PGVersion]s and all @[REP.PageSlot]s they are
-//! associated to. Page slots will be appended to @[dst_edition].
-//!
-//! @param src_edition
-//!   The source @[REP.Edition].
-//! @param dst_edition
-//!   The destination @[REP.Edition].
-//!
-//! @returns
-//! Returns true if the copy completed successfully. In case of an error
-//! there might still be a partial copy performed.
-Concurrent.Future/*array(REP.PGVersion)*/
-copy_edition_contents(REP.Edition src_edition, REP.Edition dst_edition,
-                      void|bool create_shadow_slots)
-{
-  //  Strategy to handle various combinations of sections in the source and
-  //  destination editions. The approach here is also exposed in the UI in
-  //  the method copyAllPages() in page-management2.js where the user is
-  //  informed through a confirmation prompt before the action starts.
-  //
-  //    A) No sections in either source or destination
-  //
-  //         Straightforward where pages are copied without any special
-  //         consideration.
-  //
-  //
-  //    B) Sections in source, no sections in destination
-  //
-  //         The destination will be upgraded to use the same section
-  //         definitions as the source. Definitions are not exclusive to
-  //         any publication so there shouldn't be any conflicts in doing
-  //         that. Any existing pages will be moved to the main section of
-  //         the new section-based page plan.
-  //
-  //         Applying the new section config will not include any source
-  //         sections that have weekday schedules that don't apply to the
-  //         destination's publication date. This can happen when the source
-  //         is a template edition that can carry sections for all weekdays
-  //         in parallel.
-  //
-  //         After sections have been created the pages are copied into
-  //         each section.
-  //
-  //
-  //    C) Sections in both source and destination
-  //
-  //         We can't assign the same section setup as the source uses since
-  //         that would potentially remove existing sections. Instead we
-  //         only add missing sections (determined by the "ref" field).
-  //         Again any section with a weekday schedule in the source that
-  //         isn't applicable to the destination's publication date will be
-  //         filtered out.
-  //
-  //         Following section creation the pages are copied into each
-  //         section.
-  //
-  //  As of this writing sections have no additional properties that will
-  //  be carried over, but a future version may include user properties,
-  //  deadlines or similar configuration that should be handled as well.
-
-  array(REP.Edition.Section) src_sections =
-    !src_edition->has_fallback_section() && src_edition->all_sections();
-  array(REP.Edition.Section) dst_sections =
-    !dst_edition->has_fallback_section() && dst_edition->all_sections();
-
-  REP.Notification.PushContext push_context =
-    REP.Notification.EditionPushContext (
-      REP.Types.ClientMessages.page_list,
-      dst_edition);
-
-  REP.Notification.Client.InhibitBroadcast ib =
-    REP.Notification.Client.inhibit_broadcast (push_context);
-
-  string db_root = REP.get_print_module()->get_file_db_path();
-  array(Concurrent.Future/*array(REP.PGVersion)*/) futures = ({ });
-  int fail;
-
-  Concurrent.Future/*array(REP.PGVersion)*/
-  low_copy_section(REP.Edition.Section src_section,
-                   REP.Edition.Section dst_section) {
-    //  Take the lock separately for each section
-    TableLock lock = TableLock (table_locks_for_page_slot_renumber);
-    REP.Edition.DelayPageSlotRenumber dpsr =
-      dst_edition->DelayPageSlotRenumber();
-
-    REP.PageSlot prev_slot;
-    array(REP.PageSlot) existing_dst_slots = dst_section->page_slots();
-    if (sizeof (existing_dst_slots)) {
-      prev_slot = existing_dst_slots[-1];
-    }
-
-    array(REP.PageSlot) dst_slots = ({});
-    array(REP.PageSlot) src_slots = src_section->page_slots();
-
-    foreach (src_slots, REP.PageSlot src_slot) {
-      mapping create_fields = ([
-        "subspec": src_slot->get ("subspec"),
-        "after_slot": prev_slot
-      ]);
-      if (int fixed_page_no = src_slot->get ("fixed_page_no"))
-        create_fields["fixed_page_no"] = fixed_page_no;
-      if (mixed page_color = src_slot->get("page_color"))
-        create_fields["page_color"] = page_color;
-
-      REP.PageSlot new_slot = create_page_slot (dst_section, create_fields);
-
-      //  Link slot if caller wants shadows instead of real copies
-      if (create_shadow_slots)
-        new_slot->link_shadow(src_slot);
-
-      prev_slot = new_slot;
-      dst_slots += ({ new_slot });
-    }
-
-    destruct (dpsr);
-    destruct (lock);
-
-    Concurrent.Future/*array(REP.PGVersion)*/ low_copy_future;
-    if (create_shadow_slots) {
-      //  Story appearances in the source edition should be extended to
-      //  include shadow slots as well as the stack of the new destination.
-      //  We can exclude placed stories since they will get appearances
-      //  through deconstruct.
-      mapping(int:array(REP.Story)) stories_by_ps_id = ([ ]);
-      array(REP.Story) src_stories = list_stories(src_edition);
-      foreach (src_stories, REP.Story src_story) {
-        mapping(int:mapping(string:mixed)) sa_parts =
-          src_story->story_app_parts();
-        foreach (sa_parts; int sa_part_id; mapping app) {
-          if (!app->is_placed) {
-            //  If not stack appearance, map source page group to page slots
-            array(int) ps_ids = ({ });
-            if (int pg_id = app->page_group_id) {
-              if (REP.PGVersion src_pgv =
-                  REP.DB.current_pgv_by_pg_id(pg_id, REP.RETURN_ZERO))
-                ps_ids = (src_pgv->pages()->page_slot() - ({ 0 }) )->id();
-            } else {
-              //  Stack appearance
-              ps_ids = ({ 0 });
-            }
-            foreach (ps_ids, int ps_id)
-              stories_by_ps_id[ps_id] += ({ src_story });
-          }
-        }
-      }
-      foreach ( ({ 0 }) + dst_slots, REP.PageSlot dst_slot) {
-        if (!dst_slot) {
-          //  Stack appearances
-          foreach (stories_by_ps_id[0] || ({ }), REP.Story s)
-            REP.DB.add_story_app(s, dst_edition, 0, 0);
-        } else if (REP.PageSlot parent_ps = dst_slot->shadow_parent())
-          if (array(REP.Story) map_stories = stories_by_ps_id[parent_ps->id()])
-            foreach (map_stories, REP.Story s) {
-              //  Regular appearances
-              if (REP.PGVersion dst_pgv = dst_slot->page()->pgv())
-                REP.DB.add_story_app(s, dst_edition, dst_pgv, 0);
-            }
-      }
-
-      //  We trigger targeted shadow slot updates in our new section only.
-      //  Pick a shadow copy policy that reflects whether we're branching a
-      //  zone or time-based edition.
-      ShadowCopyPolicy shadow_copy_policy;
-      if (src_edition->ze_zone_code() == dst_edition->ze_zone_code()) {
-        //  Same zone means different time-based edition. In this case we
-        //  won't have any unique ad info in the destination edition so we
-        //  copy all layers (editorial and ads) into our shadow.
-        shadow_copy_policy = OVERWRITE_ALL;
-      } else {
-        //  Different zones so policy depends on if ads are managed per zone
-        //  or duplicated into every zone. We can defer this decision by
-        //  using the default policy.
-        shadow_copy_policy = DEFAULT_SHADOW_POLICY;
-      }
-
-      low_copy_future =
-        queue_update_shadow_pgvs(src_edition->current_pg_versions(src_section),
-                                 ([ dst_edition: shadow_copy_policy ]) );
-    } else {
-      int now = time();
-      array(REP.PGVersion) new_pgvs = ({ });
-      foreach (src_edition->current_pg_versions(src_section),
-               REP.PGVersion src_pgv) {
-        if (src_pgv->get_unver ("is_deleted")) continue;
-
-        array(REP.Page) src_pages = src_pgv->pages();
-
-        if (!sizeof (filter (src_pages,
-                             lambda (REP.Page p)
-                             { REP.PageSlot slot = p->page_slot();
-                               return slot && !slot->get ("is_deleted");
-                             })))
-          continue; // If no page in the page group is connected to a
-        // non-deleted slot, skip the entire page group.
-
-        array(REP.PageSlot) src_pgv_pss = src_pages->page_slot() - ({ 0 });
-        string new_pgv_comment =
-          "Copied from " + (src_edition->get("title") || "nameless issue") +
-          ", page " + (src_pgv_pss->page_name() * ", ");
-        REP.PGVersion new_pgv =
-          copy_page_group_fields (src_pgv, dst_edition, 0,
-                                  ([ "date_created": now,
-                                     "comment": new_pgv_comment ]),
-                                  REP.LOG_ERROR);
-
-        if (!new_pgv) {
-          fail = 1;
-          continue; // Try to copy as much as we can, even if something fails.
-        }
-
-        array(mapping(string:mixed)) new_page_recs =
-          map (src_pgv->pages(),
-               lambda (REP.Page page) {
-                 return page->get_rec() - ({"page_id", "page_slot_id"});
-               });
-        new_pgv->add_pages (new_page_recs);
-
-        array(REP.Page) new_pages = new_pgv->pages();
-
-        foreach (src_pages; int page_index; REP.Page src_page) {
-          REP.Page dst_page = new_pages[page_index];
-
-          int ps_index;
-          REP.PageSlot src_slot;
-          if ((src_slot = src_page->page_slot()) &&
-              ((ps_index = search (src_slots, src_slot)) != -1)) {
-            REP.PageSlot new_slot = dst_slots[ps_index];
-            dst_page->set_fields (([ "page_slot" : new_slot ]));
-          } else {
-            // We can't leave the page unassigned since the InDesign
-            // module would recreate a new slot for it when it does its
-            // processing, so we'll create a deleted slot to put it in.
-            REP.PageSlot deleted_slot =
-              create_page_slot (dst_edition, ([ "is_deleted" : 1 ]));
-            dst_page->set_fields (([ "page_slot" : deleted_slot ]));
-          }
-        }
-
-        copy_stories_between_page_groups (src_pgv, new_pgv);
-
-        if (string src_path =
-            src_pgv->get_existing_layout_filepath (REP.RETURN_ZERO))
-          new_pgv->store_file_by_copy (db_root + src_path,
-                                       REP.Storage.UNPROC_LAYOUT_FILE,
-                                       src_pgv->layout_mime_type(),
-                                       UNDEFINED,
-                                       UNDEFINED,
-                                       src_pgv);
-
-        make_pgv_current (new_pgv);
-        new_pgvs += ({ new_pgv });
-      }
-
-      //  Join all single PGV result. We won't wait for the new PGVs to be
-      //  previewed so this PGV might not be fully initialized with all
-      //  REP.Page objects etc.
-      low_copy_future = Concurrent.resolve(new_pgvs);
-    }
-
-    return low_copy_future;
-  };
-
-  if (!src_sections && !dst_sections) {
-    //  Case A -- No sections in either source or destination
-    Concurrent.Future/*array(REP.PGVersion)*/ f =
-      low_copy_section(src_edition->main_section(),
-                       dst_edition->main_section());
-    futures += ({ f });
-  } else if (src_sections && !dst_sections) {
-    //  Case B -- Sections in source, no sections in destination
-
-    //  Apply filtered sections to destination edition. This will move all
-    //  existing pages into the main section.
-    mapping(int|string:mapping) src_section_defs_raw =
-      src_edition->get("section_defs") + ([ ]);
-    int apply_ok = dst_edition->apply_section_defs(src_section_defs_raw);
-    if (apply_ok) {
-      //  Loop over relevant sections. We match them on the "ref" field.
-      foreach (src_sections, REP.Edition.Section src_section) {
-        string src_section_ref = src_section->def()->ref();
-        if (REP.Edition.Section dst_section =
-            dst_edition->get_section_by_ref(src_section_ref)) {
-          Concurrent.Future/*array(REP.PGVersion)*/ f =
-            low_copy_section(src_section, dst_section);
-          futures += ({ f });
-        }
-      }
-    } else {
-      fail = 1;
-    }
-  } else {
-    //  Case C -- Sections in both source and destination
-
-    //  Get filtered source sections and see which ones that need to be added
-    //  to the destination. Any additions will take place at the end.
-    int(0..0)|mapping(int:mapping) src_section_defs_norm =
-      dst_edition->normalize_section_defs(src_edition->get("section_defs"));
-    if (src_section_defs_norm) {
-      array(mapping) copy_defs_raw = ({ });
-      mapping(string:int) src_section_ids = ([ ]);
-      foreach (src_section_defs_norm; int section_id; mapping src_def) {
-        //  If corresponding section is missing from destination we queue
-        //  it for copying.
-        if (!dst_edition->get_section_by_ref(src_def->ref)) {
-          copy_defs_raw += ({ src_def });
-          src_section_ids[src_def->ref] = section_id;
-        }
-      }
-
-      int apply_ok = 1;
-      if (sizeof(copy_defs_raw)) {
-        //  Update the sort order number for the new entries
-        int dst_sort_order_base = dst_sections[-1]->sort_order() + 1;
-
-        //  Find the next free section ID to use. We'll try to keep the IDs
-        //  used in the source if they are unused in the destination.
-        int next_dst_section_id = max(max(@dst_sections->id()) + 1, 100);
-
-        mapping(int|string:mapping) dst_section_defs_raw =
-          dst_edition->get("section_defs") + ([ ]);
-        for (int i = 0; i < sizeof(copy_defs_raw); i++) {
-          mapping src_def_raw = copy_defs_raw[i];
-          int dst_section_id = src_section_ids[src_def_raw->ref];
-          if (dst_section_defs_raw[dst_section_id])
-            dst_section_id = next_dst_section_id++;
-          dst_section_defs_raw[dst_section_id] =
-            src_def_raw + ([ "sort_order": dst_sort_order_base + i ]);
-        }
-
-        apply_ok = dst_edition->apply_section_defs(dst_section_defs_raw);
-      }
-
-      if (apply_ok) {
-        //  Now loop over relevant sections. We match them on the "ref" field.
-        foreach (src_sections, REP.Edition.Section src_section) {
-          REP.Edition.SectionDef src_section_def = src_section->def();
-          string src_section_ref = src_section_def->ref();
-          if (REP.Edition.Section dst_section =
-              dst_edition->get_section_by_ref(src_section_ref)) {
-            Concurrent.Future/*array(REP.PGVersion)*/ f =
-              low_copy_section(src_section, dst_section);
-            futures += ({ f });
-          }
-        }
-      } else {
-        fail = 1;
-      }
-    }
-  }
-
-  destruct (ib);
-
-  return !fail && Concurrent.results(futures);
-}
-
-
-
-// Editions
-
-array(REP.Edition) editions_in_publication(REP.Publication pub,
-                                           void|int(0..1) templates_only,
-                                           void|int(0..1) include_deleted)
-{
-  return editions_table()->object_select("publication_id = " + pub->id() +
-                                         (templates_only ?
-                                          " AND is_template = 1" :
-                                          "") +
-                                         (!include_deleted ?
-                                          " AND is_deleted = 0" :
-                                          ""));
-}
-
-array(int) template_edition_ids_in_publication(REP.Publication pub)
-{
-  //  Since only a handful will be template issues we cache them to avoid
-  //  a costly enumeration of all editions. An issue can never gain/lose
-  //  template flag once it's been created so the cache only needs to be
-  //  cleaned when a new edition is created.
-  REP.PrintDBModule print_db = REP.get_print_module();
-  array(int) res =
-    print_db->all_tmpl_editions_cache &&
-    print_db->all_tmpl_editions_cache[pub->id()];
-  if (!res) {
-    //  Rebuild cache
-    array(REP.Edition) tmpl_editions =
-      REP.DB.editions_in_publication(pub, 1, 1);
-    if (!print_db->all_tmpl_editions_cache)
-      print_db->all_tmpl_editions_cache = ([ ]);
-    res = print_db->all_tmpl_editions_cache[pub->id()] = tmpl_editions->id();
-  }
-  return res;
-}
-
-REP.Edition edition_by_id(int(1..) edition_id,
-                          void|REP.OnError on_rec_not_found) {
-  return editions_table()->object_get (edition_id, on_rec_not_found);
-}
-
-REP.Edition edition_by_uuid(string edition_uuid,
-                          void|REP.OnError on_rec_not_found) {
-  REP.ObjectTable tbl = editions_table();
-  REP.Edition edition = edition_by_id (rec_id_by_uuid (tbl, edition_uuid),
-                                       REP.RETURN_ZERO);
-
-  if (edition)
-    return edition;
-
-  return REP.raise_err(on_rec_not_found,
-                       "Edition with uuid %s not found.\n",
-                       edition_uuid);
-}
-
-REP.Edition
-create_edition(int|REP.Publication pub,
-               int|string|mapping(string:int)|Calendar.Day publ_date,
-               void|string title,
-               void|int planned_num_pages,
-               void|int(0..1) is_template,
-               void|int(0..1) skip_sections,
-               void|REP.OnError on_value_error)
-//! Create a new edition for a publication.
-//!
-//! @returns
-//!       The new publication object.
-{
-
-  if (!objectp(pub)) {
-    pub = publication_by_id(pub, on_value_error);
-    if (!pub) return 0;
-  }
-
-  mapping(string:mixed) rec = ([
-    "publ_date" : publ_date,
-    "title"     : title,
-    "planned_num_pages" : 0,  //  Unused?
-    "publication" : pub,
-    "is_template": is_template,
-  ]);
-  REP.Edition ed = editions_table()->object_create(rec, on_value_error);
-
-  if (ed) {
-    if (is_template) {
-      //  Sync template edition lookup cache. Note that the cache doesn't
-      //  need invalidation for regular editions.
-      REP.PrintDBModule print_db = REP.get_print_module();
-      if (mapping(int:array(int)) tmpl_cache =
-          print_db->all_tmpl_editions_cache) {
-        if (tmpl_cache[pub->id()])
-          tmpl_cache[pub->id()] += ({ ed->id() });
-      }
-    }
-
-    mapping update_fields = ([ ]);
-
-    //  Collect section definitions and "flatten" them to match the target
-    //  date of this edition (if not a template edition).
-    if (!skip_sections) {
-      if (mapping(int:mapping) section_defs = pub->flattened_section_defs(ed))
-        update_fields += ([ "section_defs": section_defs ]);
-    }
-
-    //  If the parent publication defines a zoning/editioning config we
-    //  flag this edition as a master edition. This happens regardless of
-    //  past or future publication date, but in case of the former the
-    //  edition will archive a snapshot of the definitions immediately.
-    if (!is_template) {
-      if (array(mapping) pub_ze_defs = pub->get_ze_defs()) {
-        //  Get the first zone code and optionally the edition code
-        mapping master_def = pub_ze_defs[0];
-        update_fields += ([
-          "ze_master_edition_id": ed->id(),
-          "ze_zone_code": master_def->zone_code,
-          "ze_edition_code": (sizeof(master_def->editions || ({ }) ) &&
-                              master_def->editions[0]->edition_code)
-        ]);
-      }
-    }
-
-    if (sizeof(update_fields))
-      ed->set_fields(update_fields);
-  }
-
-  return ed;
-}
-
-
-string|Concurrent.Future/*REP.Edition*/
-create_edition_ze(void|REP.Publication pub,
-                  void|REP.Edition parent_ed,
-                  void|int|string|mapping(string:int)|Calendar.Day publ_date,
-                  void|string new_zone_code,
-                  void|string new_edition_code,
-                  bool copy_sections,
-                  bool link_pages,
-                  void|REP.OnError on_value_error)
-{
-  //  This is the zone/edition-aware implementation of create_edition().
-  //  If this is a branch from a known parent edition we accept that as
-  //  input (together with Z/E info for the branch), but passing
-  //  publication, date and Z/E info will also resolve an existing parent/
-  //  master edition, or create a new one if missing.
-  //
-  //  Branching from an edition that isn't yet flagged as a Z/E master will
-  //  force its master status to be set.
-  //
-  //  The branch's publication date need not follow the parent/master, but
-  //  it's considered good form to make them equal. If different the UI
-  //  will show the special title, but Edit Edition and other dialog boxes
-  //  typically resets both the date and title of all editions in the
-  //  collection.
-  //
-  //  The flags for copy sections and link pages control if the new edition
-  //  is totally empty, empty with pre-defined sections, or populated with
-  //  sections as well as shadowed page slots from its parent. It's not
-  //  acceptable to enable page linking without also copying sections (even
-  //  when the parent/master is section-less).
-
-  //  We must be able to resolve publication or parent edition
-  if (!pub && !parent_ed)
-    return REP.raise_err(on_value_error,
-                         "Missing publication and parent edition.");
-  if (!pub)
-    pub = parent_ed->publication();
-
-  if (pub && !parent_ed) {
-    //  Without a known parent a publication date is necessary. Normalize
-    //  the wide spectrum of supported formats to a type supported by
-    //  editions_by_date() below.
-    if (!publ_date)
-      return REP.raise_err(on_value_error, "Missing publication date.");
-    if (mappingp(publ_date)) {
-      //  Sanity check date parts
-      mapping(string:int) t = ([ "year": publ_date->year - 1900,
-                                 "mon": publ_date->month - 1,
-                                 "mday": publ_date->day ]);
-      if (!equal(t & localtime(mktime(t)), t))
-        return REP.raise_err(on_value_error,
-                             "Incorrect publication date.");
-      publ_date =
-        sprintf("%04d%02d%02d",
-                publ_date->year, publ_date->month, publ_date->day);
-    } else if (intp(publ_date)) {
-      if (publ_date > 20000000)
-        publ_date = (string) publ_date;
-    }
-
-    //  Try to locate a parent edition based on publication date.
-    //
-    //  If there are multiple candidates we try to find one that already
-    //  acts as a master edition for extending that collection. If only
-    //  one candidate is present we take that and accept we may need to
-    //  promote it to a master edition (unless we ourselves are destined
-    //  to become a master, but that's checked later below).
-    array(REP.Edition) parent_candidates =
-      pub->editions_by_date(publ_date);
-    if (sizeof(parent_candidates) == 1) {
-      parent_ed = parent_candidates[0];
-    } else {
-      parent_candidates =
-        filter(parent_candidates, lambda(REP.Edition e) {
-            return e->is_ze_master_edition();
-          });
-      if (sizeof(parent_candidates) == 1) {
-        parent_ed = parent_candidates[0];
-      }
-    }
-  }
-
-  //  A deleted parent edition isn't eligible. The caller should ensure its
-  //  validity before calling.
-  if (parent_ed && parent_ed->get("is_deleted"))
-    return REP.raise_err(on_value_error,
-                         "Cannot branch from deleted parent edition.");
-
-  //  Fetch the Z/E definitions we currently follow. They may be archived
-  //  in the parent edition.
-  array(mapping) ze_defs = (parent_ed || pub)->get_ze_defs();
-  if (!ze_defs || !sizeof(ze_defs)) {
-    //  Not finding any Z/E definition is a blocker if we're given a
-    //  specific zone and/or edition code and/or branch parent. For
-    //  remaining scenarios we can just call create_edition().
-    if (parent_ed || new_zone_code || new_edition_code || !publ_date)
-      return REP.raise_err(on_value_error,
-                           "No zoning/editioning configuration found.");
-    REP.Edition ed = create_edition(pub, publ_date, 0, 0, 0, 0, on_value_error);
-    return Concurrent.resolve(ed);
-  }
-
-  //  Is the new edition aspiring to be a master of its own Z/E collection?
-  //  Missing zone/edition codes is a sign of that, but such call cannot be
-  //  combined with an existing parent.
-  string master_zone_code = ze_defs[0]->zone_code;
-  string master_edition_code =
-    ze_defs[0]->editions && ze_defs[0]->editions[0]->edition_code;
-  if (!new_zone_code)
-    new_zone_code = master_zone_code;
-  if (!new_edition_code && (new_zone_code == master_zone_code))
-    new_edition_code = master_edition_code;
-  bool wants_to_be_master =
-    (new_zone_code == master_zone_code) &&
-    (new_edition_code == master_edition_code);
-  if (wants_to_be_master && parent_ed)
-    return REP.raise_err(on_value_error,
-                         "Conflicting main editions.");
-
-  //  Conversely, requesting a non-master zone/edition without having
-  //  found a parent is also a no-go.
-  if (!wants_to_be_master && (new_zone_code || new_edition_code) &&
-      !parent_ed)
-    return REP.raise_err(on_value_error, "No main edition found.");
-
-  ASSERT_IF_DEBUG(!!wants_to_be_master ^ !!parent_ed);
-
-  //  Verify valid zone/edition combination. Lookup table initlally only
-  //  holds a flag for existing keys, but later we'll upgrade entries to
-  //  edition references when we look for collisions.
-  mapping(string:REP.Edition|int(1..1)) ze_lookup = ([ ]);
-  foreach (ze_defs, mapping ze_def) {
-    if (ze_def->editions) {
-      foreach (ze_def->editions, mapping e) {
-        string ze_key = sprintf("Z:%s|E:%s",
-                                lower_case(ze_def->zone_code),
-                                lower_case(e->edition_code));
-        ze_lookup[ze_key] = 1;
-      }
-    } else {
-      string ze_key = sprintf("Z:%s|E:", lower_case(ze_def->zone_code));
-      ze_lookup[ze_key] = 1;
-    }
-  }
-  string new_ze_key =
-    sprintf("Z:%s|E:%s",
-            lower_case(new_zone_code),
-            lower_case(new_edition_code || ""));
-  if (!ze_lookup[new_ze_key])
-    return REP.raise_err(on_value_error,
-                         "Requested zone code and/or edition code not "
-                         "available.");
-
-  //  If a parent is known and it has Z/E properties we get the existing
-  //  collection and look for collisions.
-  if (parent_ed && parent_ed->is_ze_edition()) {
-    array(REP.Edition) ze_eds = parent_ed->ze_collection();
-    foreach (ze_eds, REP.Edition ze_ed) {
-      string ze_key = sprintf("Z:%s|E:%s",
-                              lower_case(ze_ed->ze_zone_code()),
-                              lower_case(ze_ed->ze_edition_code() || ""));
-      ze_lookup[ze_key] = ze_ed;
-    }
-    if (objectp(ze_lookup[new_ze_key]))
-      return REP.raise_err(on_value_error,
-                           "Requested zone code and/or edition code already "
-                           "in use.");
-  } else if (parent_ed) {
-    //  We need to promote parent to a collection master so we can branch
-    //  from it.
-    parent_ed->set_fields( ([ "ze_master_edition_id": parent_ed->id(),
-                              "ze_zone_code": master_zone_code,
-                              "ze_edition_code": master_edition_code ]) );
-  }
-
-  //  Update publication date if we didn't get a value so far
-  if (!publ_date && parent_ed)
-    publ_date = parent_ed->get("publ_date");
-
-  //  Now create the branch, flag it as master if necessary, and assign
-  //  Z/E properties. We don't apply standard section definitions but instead
-  //  use parent sections if available.
-  //
-  //  We also reuse parent title in case it has been customized; this is not
-  //  perfect if the dates differ (and the date is embedded in the title),
-  //  but that is not a typical use-case.
-  bool skip_default_sections = !copy_sections || !!parent_ed;
-  string parent_title = parent_ed && parent_ed->get("title");
-  REP.Edition new_ed =
-    create_edition(pub, publ_date, parent_title, 0, 0, skip_default_sections,
-                   on_value_error);
-  if (new_ed) {
-    //  We either use the collection's existing master, or we are the new
-    //  master ourselves.
-    int master_id =
-      parent_ed ? parent_ed->get("ze_master_edition_id") : new_ed->id();
-    mapping(string:mixed) new_fields = ([
-      "ze_parent_edition_id": parent_ed && parent_ed->id(),
-      "ze_master_edition_id": master_id,
-      "ze_zone_code": new_zone_code,
-      "ze_edition_code": new_edition_code
-    ]);
-
-    //  Apply parent sections if we skipped publication defaults earlier.
-    //  However, if publication dates differ we cannot reuse them reliably
-    //  since they might include a weekly schedule that flattens to a
-    //  different result.
-    if (skip_default_sections && copy_sections) {
-      bool same_date = parent_ed->get("publ_date") == new_ed->get("publ_date");
-      mapping(int:mapping) new_section_defs =
-        same_date ?
-        parent_ed->get("section_defs") :
-        pub->flattened_section_defs(new_ed);
-      if (new_section_defs)
-        new_fields += ([ "section_defs": new_section_defs ]);
-    }
-
-    new_ed->set_fields(new_fields);
-
-    //  Link pages
-    if (parent_ed && copy_sections && link_pages) {
-      Concurrent.Future/*array(REP.PGVersion)*/ f =
-        copy_edition_contents(parent_ed, new_ed, true);
-      return f->then(lambda(array(REP.PGVersion) new_pgvs) {
-          return new_ed;
-        });
-    }
-  }
-  return Concurrent.resolve(new_ed);
-}
-
-
-
-// User properties
-
-//! Find the definitions for all user properties that are required
-//! to be defined at the specified @[level].
-//!
-//! Returns the definitions for all user properties for the publication
-//! if no @[level] is specified.
-array(REP.PropDef) propdefs_by_prefix_and_level(string prefix,
-                                                string|void level)
-{
-  array(REP.PropDef) base = ({});
-  if (prefix != "") {
-    base = propdefs_by_prefix_and_level("", level);
-  }
-
-  //  Check cache first, but beware of any weak reference that has been
-  //  converted to zero. We rely on the interpreter lock to access/update
-  //  the cache.
-  REP.PrintDBModule print_db = REP.get_print_module();
-  string cache_key = "prefixlevels:" + prefix + "|" + (level || "0");
-  array(REP.PropDef) res, cached_res;
-  if ((cached_res = print_db->user_propdefs_cache[cache_key]) &&
-      !has_value(cached_res, 0)) {
-    res = cached_res + ({ });
-  } else {
-    REP.ObjectTable tbl = user_property_defs_table();
-    string query = "publication_prefix = '" + tbl->quote(prefix) + "'";
-    if (level) {
-      query += " AND required_at = '" + tbl->quote(level) + "'";
-    }
-    res = tbl->object_select(query);
-    print_db->user_propdefs_cache[cache_key] = res + ({ });
-  }
-
-  if (sizeof(base)) {
-    if (!sizeof(res)) return base;
-
-    // We need to join the two...
-    mapping(string:int) seen = ([]);
-    foreach(res, REP.PropDef pd) {
-      seen[pd->get("property_id")] = 1;
-    }
-    foreach(base, REP.PropDef pd) {
-      if (seen[pd->get("property_id")]) continue;
-      res += ({ pd });
-    }
-  }
-  return res;
-}
-
-//! Get the definition for a specific user property given its
-//! publication prefix and property name.
-REP.PropDef propdef_by_prefix_and_name(string prefix,
-                                       string propname,
-                                       void|REP.OnError on_rec_not_found)
-{
-  //  Check cache first, but beware of any weak reference that has been
-  //  converted to zero. We rely on the interpreter lock to access/update
-  //  the cache.
-  array(REP.PropDef) res, cached_res;
-  REP.PrintDBModule print_db = REP.get_print_module();
-  string cache_key = "prefixname:" + prefix + "|" + propname;
-  if ((cached_res = print_db->user_propdefs_cache[cache_key]) &&
-      !has_value(cached_res, 0)) {
-    res = cached_res + ({ });
-  } else {
-    REP.ObjectTable tbl = user_property_defs_table();
-    res =
-      tbl->object_select("publication_prefix = '" + tbl->quote(prefix) + "'"
-                         " AND property_id = '" + tbl->quote(propname) + "'");
-    print_db->user_propdefs_cache[cache_key] = res + ({ });
-  }
-
-  if (sizeof(res)) return res[0];
-  if (prefix != "") {
-    return propdef_by_prefix_and_name("", propname, on_rec_not_found);
-  }
-  REP.raise_err(on_rec_not_found,
-                "No such property: %s.\n", propname);
-}
-
-//! Get a property definition given its internal id.
-REP.PropDef propdef_by_id(int id, void|REP.OnError on_rec_not_found)
-{
-  return user_property_defs_table()->object_get(id, on_rec_not_found);
-}
-
-REP.PropDef create_user_prop_def(string pub_prefix,
-                                 string user_prop,
-                                 mapping(string:mixed) def,
-                                 void|REP.OnError on_error)
-{
-  //  Default value will be added after object is created
-  REP.Publication pub =
-    (pub_prefix != "") && publication_by_prefix(pub_prefix, 1, REP.RETURN_ZERO);
-  int lde_def_rev = current_lde_def_rev(pub);
-  mapping(string:mixed) fields = ([
-    "publication_prefix" : pub_prefix,
-    "property_id"        : user_prop,
-    "revision"           : lde_def_rev,
-    "required_at"        : def["required-level"] || "",
-    "type"               : def["type"],
-  ]);
-
-  // FIXME: Ought to use object_insert_or_update() or object_replace(),
-  //        but they don't exist.
-  REP.ObjectTable tbl = user_property_defs_table();
-  array(REP.PropDef) existing = tbl->
-    object_select("publication_prefix = '" + tbl->quote(pub_prefix || "") + "' "
-                  "AND property_id = '" + tbl->quote(user_prop) + "'");
-  REP.PropDef propdef =
-    (sizeof(existing) && existing[0]) ||
-    tbl->object_create(fields, on_error);
-
-  //  Now set (or update) fields including default value using type coercion
-  if (propdef) {
-    propdef->set_fields(fields);
-    mixed cast_default_value = propdef->cast_to_prop_type(def["default"]);
-    propdef->set_fields( ([ "default" : cast_default_value ]) );
-  }
-
-  REP.get_print_module()->invalidate_user_propdefs_cache();
-
-  return propdef;
-}
-
-// Publications
-
-array(REP.Publication) list_publications()
-//! List all publications and return an array of their
-//! @[REP.Publication] objects. The array is sorted on publication
-//! title (but not with a locale-specific sort algorithm).
-{
-  REP.PrintDBModule print_db = REP.get_print_module();
-  array(REP.Publication) res = print_db->all_publ_cache;
-  if (!res)
-    res = print_db->all_publ_cache =
-      publications_table()->object_select ("TRUE", 0, "ORDER BY title");
-  return res;
-}
-
-REP.Publication publication_by_id(int(1..) publication_id,
-                                  void|REP.OnError on_rec_not_found) {
-
-  REP.ObjectTable tbl = publications_table();
-  return tbl->object_get(publication_id, on_rec_not_found);
-}
-
-REP.Publication publication_by_uuid(string publication_uuid,
-                                    void|REP.OnError on_rec_not_found)
-{
-  REP.ObjectTable tbl = publications_table();
-  REP.Publication publ = publication_by_id (rec_id_by_uuid (tbl,
-                                                            publication_uuid),
-                                            REP.RETURN_ZERO);
-
-  if (publ)
-    return publ;
-
-  return REP.raise_err(on_rec_not_found,
-                       "Publication with uuid %s not found.\n",
-                       publication_uuid);
-}
-
-REP.Publication publication_by_prefix(string prefix,
-                                      void|int include_deleted,
-                                      void|REP.OnError on_rec_not_found) {
-  // FIXME: Consider a lookup mapping if this function is used
-  // frequently.
-
-  //  Prefixes must not differ only in caseness since the underlying file
-  //  system representation cannot always make a distinction of case alone.
-  prefix = lower_case(prefix);
-
-  foreach (list_publications(), REP.Publication publ)
-    if (lower_case(publ->get ("prefix")) == prefix) {
-      if (include_deleted || !publ->get ("is_deleted"))
-        return publ;
-      break;
-    }
-
-  return REP.raise_err (on_rec_not_found, "Unknown publication prefix %O.\n",
-                        prefix);
-}
-
-
-constant invalid_pub_prefixes = (< "db-objs", "spool", "spool-errors" >);
-//! Publication prefixes (in lower-case form) that are invalid due to name
-//! clash in the print/db/ storage.
-
-
-//! Factory method for creating new publications, ie not just fetch
-//! object representations of existing ones. If an old, deleted,
-//! publication with the same prefix is found, that one is reused by
-//! undeleting it an renaming it.
-//! @param title
-//!        The title of the new publication.
-//! @param prefix
-//!        The prefix of the new publication.
-//! @param init_values
-//!        Mapping with initial values for other properties than title and prefix.
-//! @returns
-//!        A new publication object.
-REP.Publication create_publication(string title,
-                                   string prefix,
-                                   void|REP.OnError on_rec_exists,
-                                   void|mapping(string:mixed) init_values,
-                                   void|REP.OnError on_invalid_rec)
-{
-
-  REP.Publication old = publication_by_prefix(prefix, 1, REP.RETURN_ZERO);
-
-  if (old) {
-    if (!old->get("is_deleted")) {
-      return REP.raise_err(on_rec_exists,
-                           "A publication with prefix %s already exists!\n",
-                           prefix);
-    }
-
-    mapping(string:mixed) init_rec = init_values || ([]);
-    init_rec->title = title;
-    init_rec->is_deleted = 0;
-    old->low_set_raw (init_rec);
-    old->set_default_user_properties();
-    return old;
-  }
-
-  else {
-    for (int i = 0; i < sizeof (prefix); i++) {
-      int c = prefix[i];
-      if (!((c >= '0' && c <= '9') ||
-            (c >= 'a' && c <= 'z') ||
-            (c >= 'A' && c <= 'Z')))
-        return REP.raise_err (on_invalid_rec, "Invalid characters in prefix.\n");
-    }
-    if (invalid_pub_prefixes[lower_case(prefix)]) {
-      return REP.raise_err(on_invalid_rec, "Reserved prefix.\n");
-    }
-
-    mapping(string:mixed) init_rec = init_values || ([]);
-
-    init_rec->title = title;
-    init_rec->prefix = prefix;
-
-    REP.Publication pub = publications_table()->object_create(init_rec);
-    REP.get_print_module()->all_publ_cache = 0;
-    return pub;
-  }
-}
-
-
-
-//  Formatter for page numbers according to jump format setting in a section
-string format_jump_page_number(REP.PageSlot ps)
-{
-  //  The format string will be something like "A1", "A-1" or "1".
-  //  C.f. REP.Edition.SectionDef.default_jump_formats.
-  string fmt = ps->section_def()->jump_format();
-  string marker = ps->section_marker();
-  string page_no = (string) ps->get("calc_page_no");
-  return replace(fmt, ([ "A": marker, "1": page_no ]) );
-}
-
-
-//  User-configurable page variables. These can be global (for all editions
-//  or a particular name), associated to a publication prefix or specific to
-//  an edition name. A more specific occurrence will override a global one.
-//
-//  Variable values are text-based and the names will be prefixed with
-//  "REP:" to ensure uniqueness in InDesign.
-mapping(string:string) get_default_text_variables_for_pgv(REP.PGVersion pgv)
-{
-  array(REP.PageSlot) slots =
-    REP.DB.sort_page_slots_by_order(pgv->pages()->page_slot() - ({ 0 }));
-  if (!sizeof(slots))
-    return ([ ]);
-
-  REP.Edition ed = pgv->edition();
-  REP.PageSlot ps = slots[0];
-  REP.Edition.SectionDef section_def = ps->section_def();
-
-  return ([
-    //  Counterparts to %{section} and %{section_name}
-    "REP:Section": ps->section_marker(),
-    "REP:Section-Name": (section_def && section_def->label()) || "",
-
-    //  Counterparts to %{zone_code} and %{cone_name}
-    "REP:Zone-Code": ed->ze_zone_code() || "",
-    "REP:Zone-Name": ed->ze_zone_label() || "",
-
-    //  Counterparts to %{edition_code}
-    "REP:Edition-Code": ed->ze_edition_code() || ""
-  ]);
-}
-
-
-mapping(string:string)|int(0..0) get_text_variables_for_pgv(REP.PGVersion pgv)
-{
-  ASSERT_IF_DEBUG(pgv);
-
-  REP.Edition ed = pgv->edition();
-  REP.Publication publ = ed->publication();
-  string ed_title = ed->get("title");
-  mapping(string:string) res = ([ ]);
-
-  if (REP.PrintDBModule print_db = REP.get_print_module()) {
-    mapping(string:mapping(string:mapping(string:string))) all_vars =
-      print_db->get_all_text_variables();
-    //  Add system defaults for section, zone and editioning. These may be
-    //  overridden by user-defined entries below.
-    res += get_default_text_variables_for_pgv(pgv);
-
-    //  Global variables
-    if (mapping(string:mapping) global_vars = all_vars[""]) {
-      res += (global_vars[""] || ([ ]) ) + (global_vars[ed_title] || ([ ]) );
-    }
-
-    //  Publication- and edition-specific variables
-    if (mapping(string:mapping) publ_vars = all_vars[publ->get("prefix")]) {
-      res += (publ_vars[""] || ([ ]) ) + (publ_vars[ed_title] || ([ ]) );
-    }
-  }
-
-  foreach (res; string index; string value) {
-    res[index] = REP.Storage.format_external_filename_wide (value, pgv);
-  }
-
-  return sizeof(res) && res;
-}
-
-mapping(string:mapping(string:string))|int(0..0)
-  get_story_jump_variables_for_pgv(REP.PGVersion pgv)
-{
-  ASSERT_IF_DEBUG(pgv);
-
-  REP.Edition ed = pgv->edition();
-  if (ed->is_template())
-    return 0;
-
-  mapping(string:REP.TextFlowLink) cur_tfls = pgv->cur_text_flow_links();
-  mapping res = ([ ]);
-  foreach (cur_tfls; string tfl_uuid; REP.TextFlowLink tfl) {
-    array(REP.Story) stories = tfl->stories_in_link();
-    foreach (stories, REP.Story s) {
-      //  Jump title
-      string jump_title = s->get_jump_title();
-
-      //  Jump source and destination page slots. The identified page groups
-      //  may contain multiple pages, but the story may not be touching all
-      //  of them. We locate the first or last page in the PGV where the
-      //  story has touching page items.
-      //
-      //  We exclude page subspec in these labels since that's mostly a
-      //  production detail and not reader-visible.
-      string prev_page, next_page;
-      if (REP.TextFlowLink prev_link = tfl->preceding_link()) {
-        if (REP.PageSlot last_ps = prev_link->get_last_page_slot(s)) {
-          prev_page = format_jump_page_number(last_ps);
-        }
-      }
-      if (REP.TextFlowLink next_link = tfl->following_link()) {
-        if (REP.PageSlot first_ps = next_link->get_first_page_slot(s)) {
-          next_page = format_jump_page_number(first_ps);
-        }
-      }
-
-      res[(string) s->story_doc_id(pgv)] = ([ "jump_title": jump_title,
-                                              "prev_page": prev_page,
-                                              "next_page": next_page ]);
-    }
-  }
-
-  return sizeof(res) && res;
-}
-
-void|mapping(string:int(1..1)) pgv_jump_preflight(REP.PGVersion pgv)
-{
-  //  Same jump checks as in REP.Story::outdated_placements_in_edition().
-  //
-  //  We skip jump head/reflow warnings on shadow pages since there will
-  //  be false positives due to text flow link hashes that originate from
-  //  the shadow parent.
-  mapping res = ([ ]);
-  if (!pgv->is_shadow()) {
-    mapping(string:REP.TextFlowLink) cur_tfls = pgv->cur_text_flow_links();
-    foreach (cur_tfls; string tfl_uuid; REP.TextFlowLink tfl) {
-      //  Missing head snippet trumps reflow need in same chain
-      if (tfl->chain_missing_head_text()) {
-        res["jump-head"] = 1;
-      } else {
-        [int update_type, REP.PGVersion src_pgv,
-         REP.Storage.FileType src_snippet] = tfl->reflow_source();
-        if (update_type == 1)
-          res["jump-reflow"] = 1;
-      }
-    }
-  }
-
-  //  Cross-ref error could also refer to same story that lacks head snippet,
-  //  but this is not easily checked. We'll report both to cover the case
-  //  where the errors are for independent stories.
-  if (pgv_needs_jump_variable_update(pgv))
-    res["jump-xref"] = 1;
-
-  return sizeof(res) && res;
-}
-
-bool pgv_needs_jump_variable_update(REP.PGVersion pgv)
-{
-  //  Compare what the page would require vs what we have saved on last
-  //  deconstruct. If the page is too old to have layout info or even
-  //  jump variable extraction we don't raise a flag; such pages pre-date
-  //  the new story jump implementation and isn't relevant to handle.
-  mapping li = pgv->get("doc_layout_info");
-  if (!mappingp(li) || !mappingp(li->jump_vars))
-    return false;
-
-  //  NOTE: If this becomes a bottleneck with many stories on pages,
-  //        consider a step-by-step check that fetches doc ID strings
-  //        first for a rough check, and only if matching dig deeper
-  //        into prev/next references. The slot analysis code in the
-  //        jump variable fetching processes layout page items for all
-  //        occurrences right now.
-  if (mapping(string:mapping(string:string)) story_jump_vars =
-      get_story_jump_variables_for_pgv(pgv)) {
-    //  The "jump_vars" record from layout info should be structured as
-    //  follows:
-    //
-    //    ([ "-1015": ([ "count": 2,
-    //                   "jump_title": "Foobar",
-    //                   "next_page": "C16",
-    //                   "prev_page": 0 ]),
-    //       "-1284": ([ ... ]),
-    //       [...]
-    //    ])
-    //
-    //  Note the "count" key which counts the number of times any of the
-    //  three variables (i.e. aggregated per story doc id) is used in the
-    //  layout. We only care for non-zero counts since we don't need to
-    //  warn for unused variables (which are expected for non-jump articles).
-    mapping(string:mapping(string:string)) cur_page_jump_vars = li->jump_vars;
-
-    foreach (story_jump_vars; string doc_id_str; mapping story_jv) {
-      mapping(string:string) cur_page_jv = cur_page_jump_vars[doc_id_str];
-      if (!cur_page_jv ||
-          (cur_page_jv->count &&
-           !equal(cur_page_jv - ({ "count" }), story_jv))) {
-        //  Either new document ID or its variable values are different
-        return true;
-      }
-    }
-  }
-
-  //  Not using any jump variables (e.g. a template page) means we're ok
-  return false;
-}
-
-mapping(string:mapping(string:string))
-  get_new_story_placement_story_jump_variables(void|REP.PGVersion pgv,
-                                               REP.Story s)
-{
-  string story_doc_id_str = (string) s->story_doc_id(pgv);
-  if (pgv) {
-    //  Use existing jump variables for this doc ID if available
-    if (mapping(string:mapping(string:string|int)) pgv_jump_vars =
-        REP.DB.get_story_jump_variables_for_pgv(pgv)) {
-      if (mapping cur_story_jump_vars = pgv_jump_vars[story_doc_id_str])
-        return ([ story_doc_id_str: cur_story_jump_vars ]);
-    }
-  }
-
-  return ([ story_doc_id_str: ([ "jump_title": s->get_jump_title(),
-                                 "prev_page": 0,
-                                 "next_page": 0 ]) ]);
-}
-
-mapping(string:mapping(string:string))|int(0..0)
-  get_new_jump_placement_story_jump_variables(REP.PGVersion pgv,
-                                              REP.Story s, string tc_uuid)
-{
-  //  We cannot look for the text chain associated to the PGV since it is
-  //  about to be placed. Instead we find it through the UUID.
-  ASSERT_IF_DEBUG(pgv);
-
-  REP.Edition ed = pgv->edition();
-  if (ed->is_template())
-    return 0;
-
-  mapping(string:array(REP.TextFlowLink)) ed_text_chains =
-    ed->get_text_chains();
-  if (array(REP.TextFlowLink) tfls = ed_text_chains[tc_uuid]) {
-    //  Jump title
-    string jump_title = s->get_jump_title();
-
-    //  For a new placement the previous page reference will be the last
-    //  in the chain, and the next page is empty.
-    REP.TextFlowLink last_tfl = tfls[-1];
-    string prev_page;
-    if (REP.PageSlot last_ps = last_tfl->get_last_page_slot(s)) {
-      prev_page = format_jump_page_number(last_ps);
-    }
-
-    return ([ (string) s->story_doc_id(pgv): ([ "jump_title": jump_title,
-                                                "prev_page": prev_page,
-                                                "next_page": 0 ]) ]);
-  }
-  return 0;
-}
-
-
-
-// Miscellaneous
-
-int get_story_item_status_id (string story_item_status,
-                              void|REP.OnError on_not_found)
-{
-  if (int res =
-      REP.get_print_module()->get_story_item_status_id (story_item_status, 1))
-    return res;
-  return REP.raise_err (on_not_found, "Unknown story item status %O.\n",
-                        story_item_status);
-}
-
-string get_story_item_status (int story_item_status_id,
-                              void|REP.OnError on_not_found)
-{
-  return REP.get_print_module()->get_story_item_status (story_item_status_id,
-                                                        on_not_found);
-}
-
-int get_file_type_id (REP.Storage.FileType file_type,
-                      void|REP.OnError on_not_found)
-//! Returns the table id for the given file type.
-//!
-//! @note
-//! This function is hopefully a temporary measure.
-{
-  if (REP.Storage.is_pdf_preview (file_type))
-    file_type = "pdf-preview";
-  if (int res = REP.get_print_module()->get_file_type_id (file_type, 1))
-    return res;
-  return REP.raise_err (on_not_found, "Unknown file type %O.\n", file_type);
-}
-
-int get_page_type_id (string page_type, void|REP.OnError on_not_found)
-{
-  if (int res = REP.get_print_module()->get_page_type_id (page_type, 1))
-    return res;
-  return REP.raise_err (on_not_found, "Unknown page type %O.\n", page_type);
-}
-
-string get_page_type (int page_type_id, void|REP.OnError on_not_found)
-{
-  return REP.get_print_module()->get_page_type (page_type_id, on_not_found);
-}
-
-int get_page_status_id (string page_status, void|REP.OnError on_not_found)
-{
-  if (int res = REP.get_print_module()->get_page_status_id (page_status, 1))
-    return res;
-  return REP.raise_err (on_not_found, "Unknown page status %O.\n", page_status);
-}
-
-string get_page_status (int page_status_id, void|REP.OnError on_not_found)
-{
-  return REP.get_print_module()->get_page_status (page_status_id, on_not_found);
-}
-
-int pdf_settings_generation (REP.Publication publ)
-{
-  //  Note that this generation counter also affects InDesign package validity
-  return publ->get ("pdf_settings_gen");
-}
-
-int bump_pdf_settings_generation (REP.Publication publ)
-{
-  // The counter always increases so the race should be harmless.
-  publ->set_fields (([ "pdf_settings_gen": publ->get ("pdf_settings_gen")+1 ]));
-  return publ->get ("pdf_settings_gen");
-}
-
-
-
-// LDE -- multilingual labels
-
-mapping(string:string) get_label(int label_id)
-//!  Queries the labels table for a given ID. The returned mapping will
-//!  contain entries for all languages for which the label is defined.
-//!
-//!  @param label_id
-//!    The ID of the existing label.
-//!  @returns
-//!    A mapping from language to label string, or an empty mapping for
-//!    unknown IDs. Don't be destructive on it.
-{
-  if (!label_id) return ([]);
-  REP.CachedTable tbl = labels_table();
-  mapping(string:string) names = ([]);
-  mapping(string:mixed) rec =
-    tbl->cached_get (label_id, REP.RETURN_ZERO);
-  if (rec) names = rec->langs;
-  return names;
-}
-
-int set_label(int label_id, mapping(string:string) label)
-//!  Updates an existing label with new values or adds a new label to
-//!  the database. If fewer languages are present in this label
-//!  compared to the old version the additional strings are deleted.
-//!
-//!  @param label_id
-//!    The ID of the existing label, or 0 to create a new label.
-//!  @param label
-//!    A mapping from language to label string.
-//!  @returns
-//!    The label ID if an entry was added or modified and 0 if not found.
-{
-  ASSERT_IF_DEBUG (mappingp (label));
-  REP.CachedTable tbl = labels_table();
-  mapping rec = ([ "langs" : label ]);
-
-  if (label_id) {
-    rec->label_id = label_id;
-    if (!tbl->cached_get (label_id, REP.RETURN_ZERO))
-      return 0;
-
-    tbl->cached_update (rec);
-  } else {
-    return tbl->cached_insert (rec);
-  }
-}
-
-void remove_label(int label_id)
-//!  Removes a label referenced by a given ID from the database. Does
-//!  nothing if the ID cannot be found.
-//!
-//!  @param label_id
-//!    The ID of the existing label.
-{
-  REP.CachedTable tbl = labels_table();
-  tbl->cached_remove (label_id);
-}
-
-string select_label(mapping(string:string) label,
-                    void|array(string) extra_langs)
-//! Selects a label from a mapping from language to label.
-//!
-//! @param label
-//!   The mapping from language to label value.
-//!
-//! @param extra_langs
-//!   Normally the languages in the current @[REP.ClientSession] are
-//!   used to select a suitable language. This may specify additional
-//!   languages when there is no active client session, or none of its
-//!   languages fit. May be zero.
-//!
-//! @note
-//!   If both @[cs] and @[extra_langs] are provided, the union of
-//!   languages from both of them will be used with @[cs] taking
-//!   precedence.
-{
-  array(string) languages = ({});
-  if (REP.ClientSession cs = REP.get_session()->cs) languages += cs->languages;
-  if (extra_langs) languages += extra_langs;
-  languages = Array.uniq (languages);
-
-  //  Select most appropriate label based on the user's preferred language.
-  //
-  //  As a friendly help to avoid spurious label missing errors we always
-  //  include "en" as fallback. We may still fail for non-user sessions
-  //  with weird language configs but labels shouldn't be cached in objects
-  //  anyway so it should be invisible.
-  if (!has_value(languages, "en"))
-    languages += ({ "en" });
-  foreach(languages, string lang)
-    if (string val = label[lang])
-      return val;
-  return "(Label missing for language " +
-    (sizeof (languages) ? "'" + languages[0] + "'" : "(no language given)") +
-    ")";
-}
-
-
-//  LDE -- story template and component definitions
-
-private void set_lde_parameters(mapping params, string type, int parent_id)
-{
-  mapping base = ([ "type"   : type,
-                    "def_id" : parent_id ]);
-  array(mapping) recs = ({ });
-  foreach (params; string name; string val) {
-    mapping rec = ([ "name"  : name,
-                     "value" : val ]) + base;
-    recs += ({ rec });
-  }
-  parameters_table()->insert(@recs);
-}
-
-
-REP.StoryTemplateDef
-create_lde_story_template_def(int(0..0)|string pub_prefix,
-                              mapping(string:mixed) fields,
-                              int config_revision,
-                              void|REP.OnError on_value_error)
-//!  Creates a new story template definition record in the SQL
-//!  database, together with any referenced labels, parameters and
-//!  constraints. Related component definitions must be added using
-//!  @[create_lde_component_def] before calling this method.
-//!
-//!  @param pub_prefix
-//!    The publication for which this LDE configuration applies to, or zero
-//!    for global definitions.
-//!
-//!  @param fields
-//!    Story template definition structure returned by the LDE config parser.
-{
-  //  Story template record
-  mapping geom = fields->geometry;
-  mapping(string:mixed) tmpl_rec =
-    ([ "name"               : fields->id,
-       "publication_prefix" : pub_prefix || "",
-       "revision"           : config_revision,
-       "label_id"           : set_label(0, fields->label) ]);
-  REP.StoryTemplateDef tmpl_def =
-    story_tmpl_defs_table()->object_create(tmpl_rec, on_value_error);
-  int tmpl_def_id = tmpl_def->id();
-
-  //  Parameters
-  if (sizeof(fields->params))
-    set_lde_parameters(fields->params, "story", tmpl_def_id);
-
-  //  Constraints
-  if (array(mapping) constrs = geom && geom->constraints) {
-    if (sizeof (constrs)) {
-      array(mapping(string:mixed)) constr_recs = ({ });
-      foreach (constrs, mapping constr) {
-        mapping(string:mixed) constr_rec =
-          ([ "story_tmpl_def_id" : tmpl_def_id,
-             "apply_to"          : constr->apply_to,
-             "name"              : constr->name,
-             "value"             : constr->value ]);
-        constr_recs += ({ constr_rec });
-      }
-      constraints_table()->insert(@constr_recs);
-    }
-  }
-
-  //  Create component area definitions for story template.
-  array(mapping(string:int)) ref_recs = ({ });
-  foreach (fields->refs; int i; mapping(string:mixed) ref) {
-    mapping(string:mixed) comp_area_rec =
-      ([ "story_tmpl_def_id" : tmpl_def_id,
-         "component_def_id"  : ref->ref_id,
-         "name"              : ref->name,
-         "order"             : i+1,
-         "size"              : ref->size,
-         "label_id"          : ref->opt_label && set_label(0, ref->opt_label)
-      ]);
-
-    component_area_defs_table()->object_create (comp_area_rec, on_value_error);
-  }
-
-  REP.get_print_module()->clear_cached_tmpl_ids();
-  return tmpl_def;
-}
-
-REP.StoryTemplateDef
-create_derived_story_template_def (
-  REP.StoryTemplateDef base_def,
-  REP.PGVersion src_pgv,
-  string src_ext_page_id,
-  int src_page_item_id,
-  string display_name,
-  mapping(string:REP.ComponentDef|mapping(string:mixed)) component_data,
-  void|array(string) geometry_snippets,
-  void|array(mapping) geometry_bounds,
-  void|array(string) publ_prefix_visibility,
-  void|array(mapping) autolayout,
-  void|int(0..1) is_jump_template,
-  void|REP.OnError on_value_error)
-{
-  string pub_prefix = base_def->get ("publication_prefix");
-
-  // Note: derived templates use the storage counter of the PGVersion
-  // they got created from as their revision. This enables correct
-  // updating and deletion of derived templates from template pages.
-
-  mapping(string:mixed) tmpl_rec =
-    ([ "name"               : REP.IDS.mangle_template_name (display_name),
-       "label_id"           : set_label (0, ([ "en": display_name ])),
-       "publication_prefix" : pub_prefix,
-       "revision"           : src_pgv->get ("storage_counter"),
-       "parent_id"          : base_def->id(),
-       "source_pgv_id"      : src_pgv->id(),
-       "source_ext_page_id" : src_ext_page_id,
-       "source_page_item_id": src_page_item_id,
-       "autolayout"         : autolayout,
-       "is_jump_template"   : is_jump_template
-    ]);
-
-  //  Add publication visibility
-  if (publ_prefix_visibility) {
-    if (!base_def->publication()) {
-      tmpl_rec->publication_visibility = publ_prefix_visibility;
-    } else {
-      werror("Cannot set publication visibility of a story template in "
-             "non-global space (base def: %O).\n", base_def);
-    }
-  }
-
-  if (geometry_snippets) {
-    //  External storage of array(string)
-    tmpl_rec->geometry_snippet = geometry_snippets;
-
-    //  This is the best preview we have so far, but the first time a story
-    //  is placed server-side using this snippet we will also pre-parse the
-    //  markup and get a washed preview (sans blue and yellow designators)
-    //  as a bonus.
-    array(string) raw_jpegs =
-      map(geometry_snippets, REP.IDS.get_snippet_jpeg_preview);
-    if (sizeof(raw_jpegs - ({ 0 }) ))
-      tmpl_rec->geometry_snippet_preview = raw_jpegs;
-
-    //  Set initial bounds if known
-    if (geometry_bounds)
-      tmpl_rec->geometry_snippet_bounds = geometry_bounds;
-  }
-
-#if 0
-  // Bump revision in current def before enabling this optimization.
-  if (REP.StoryTemplateDef current_def =
-      story_template_def_for_publication (base_def->publication(),
-                                          tmpl_rec->name)) {
-    if (current_def->parent_id == tmpl_rec->parent_id &&
-        current_def->geometry_snippet == tmpl_rec->geometry_snippet)
-      return;
-  }
-#endif
-
-  REP.StoryTemplateDef new_def =
-    story_tmpl_defs_table()->object_create(tmpl_rec, on_value_error);
-  int new_def_id = new_def->id();
-
-  Sql.Sql db = REP.get_db();
-
-  // Copy parameters
-  if (mapping(string:mixed) story_tmpl_params = base_def->get_parameters())
-    if (sizeof (story_tmpl_params))
-      set_lde_parameters (story_tmpl_params, "story", new_def_id);
-
-  // Copy constraints
-  array(mapping(string:mixed)) new_constr_recs = ({ });
-  foreach (db->query ("SELECT story_tmpl_def_id, apply_to, name, value "
-                      "  FROM constraints "
-                      " WHERE story_tmpl_def_id = %d",
-                      base_def->id()),
-           mapping(string:mixed) row) {
-    new_constr_recs += ({ ([ "story_tmpl_def_id" : new_def_id,
-                             "apply_to"          : row->apply_to,
-                             "name"              : row->name,
-                             "value"             : row->value ]) });
-  }
-  if (sizeof(new_constr_recs)) {
-    constraints_table()->insert(@new_constr_recs);
-    new_def->flush_constraints_cache();
-  }
-
-  // Create new component area defs based on the ones from base_def,
-  // but with the correct sizes.
-  array(string) components = indices (component_data);
-  sort (components);
-  array(mapping(string:mixed)) res_comps = ({});
-  multiset(REP.ComponentAreaDef) used_ca_defs = (<>);
-
-  int(0..1) field_mappings_equal (mapping(string:mixed) m1,
-                                  mapping(string:mixed) m2)
+  //! Clear ~1/10th of the cache.
+  void clear_some_cache()
   {
-    if (!m1 && !m2) return 1;
-    if (!m1 && m2) return 0;
-    if (m1 && !m2) return 0;
-
-    foreach (m1; string name; mixed data)
-      if (m2[name] && !equal(data, m2[name]))
-        return 0;
-
-    return 1;
-  };
-
-  mapping(string:int) comp_name_count = ([ ]);
-  foreach (components, string comp_spec) {
-    mapping(string:mixed)|REP.ComponentDef data = component_data[comp_spec];
-    sscanf (comp_spec, "%s#%d", string comp_name, int count);
-    REP.ComponentAreaDef ca_def =
-      base_def->component_area_def_by_comp_name (comp_name);
-
-    if (!ca_def) {
-      werror ("No component area def / component def named %O found.\n",
-              comp_name);
-      continue;
+    // FIXME: Use an iterator to avoid indices() here.
+    array(string) q = indices(cache);
+    if(!sizeof(q))
+    {
+      current_size=0;
+      return;
     }
 
-    used_ca_defs[ca_def] = 1;
-
-    mapping(string:mixed) prev_comp_data =
-      sizeof (res_comps) && res_comps[-1];
-    if (prev_comp_data &&
-        field_mappings_equal (data->fields, prev_comp_data->fields) &&
-        comp_name == prev_comp_data->comp_name) {
-      // Identical field specs, we can reuse the same entry to avoid
-      // unnecessary component area defs below.
-      prev_comp_data->size++;
-      continue;
-    }
-
-    data->comp_name = comp_name;
-    data->size = 1;
-    data->ca_def = ca_def;
-
-    res_comps += ({ data });
-    comp_name_count[comp_name]++;
-  }
-
-  sort (res_comps->ca_def->order(), res_comps);
-
-  int new_order = 1;
-  mapping(string:int) comp_name_offset = ([ ]);
-  mapping(REP.ComponentDef:int) override_area_label = ([ ]);
-
-  foreach (res_comps, mapping(string:mixed) data) {
-    REP.ComponentAreaDef orig_ca_def = data->ca_def;
-    REP.ComponentDef new_comp_def;
-
-    if (new_comp_def = data->comp_def) {
-      // Component def already created by
-      // handle_new_component_template (print-indesign-server).
-    } else {
-      REP.ComponentDef orig_comp_def = orig_ca_def->component_def();
-      mapping(string:array(mapping(string:mixed))) styles_by_field = ([]);
-
-      foreach (orig_comp_def->get_field_defs(), REP.FieldDef field_def) {
-        array(mapping(string:mixed)) styles = ({});
-        string field_name = field_def->get_name();
-        if (mapping(string:mixed) new_field_info = data->fields[field_name]) {
-          foreach (({ "para", "char" }), string type) {
-            foreach (new_field_info[type + "Styles"] || ({ }),
-                     mapping style_info) {
-              string disp_name = style_info.label;
-              mapping style_attrs = style_info.attrs || ([ ]);
-
-              mapping(string:mixed) style_props;
-              if (style_props = style_attrs.styleProps) {
-                mapping(string:int) valid_props =
-                  REP.FieldStyle.valid_props[type];
-                ASSERT_IF_DEBUG (!sizeof (style_props - valid_props));
-                style_props = REP.DB.decode_objects (style_props);
-              }
-
-              styles += ({
-                ([ "type"               : type,
-                   "name"               : Sitebuilder.mangle_to_09_az(disp_name),
-                   "label_id"           : set_label(0, ([ "en": disp_name ]) ),
-                   "style_extref"       : style_info.extref,
-                   "style_extref_group" : style_info.extref_group,
-                   "css"                : style_attrs.css || "",
-                   "props"              : style_props,
-                ]) });
-            }
-          }
-        }
-
-        if (sizeof (styles)) styles_by_field[field_name] = styles;
-      }
-
-      int rev = src_pgv->get ("storage_counter");
-      mapping(string:mixed) comp_def_fields = ([
-        // Assign unique names to autocreated components to avoid name
-        // clashes with base component definitions.
-        "name"               : orig_comp_def->get_name() + sprintf ("-%d", rev),
-        "revision"           : rev,
-        "source_pgv_id"      : src_pgv->id(),
-        "parent_id"          : orig_comp_def->id(),
-        "is_auto_created"    : 1,
-      ]);
-
-      new_comp_def = copy_component_def (orig_comp_def, comp_def_fields,
-                                         styles_by_field);
-
-      //  If this component name appears multiple times we need to give each
-      //  area a unique label. For instance, having four image captions in a
-      //  template where the first uses different styles will force us to
-      //  have extra "Image" areas instead of unifying them. We then wish to
-      //  name them e.g. "Image (#1)" and "Image (#2-#4)" to indicate that
-      //  the first one expects one item and the other three items.
-      if (comp_name_count[data->comp_name] > 1) {
-        //  We keep a running counter for each name to track number of
-        //  previous item placeholders inserted.
-        int idx_start = comp_name_offset[data->comp_name] + 1;
-        int idx_end = idx_start + data->size - 1;
-        comp_name_offset[data->comp_name] = idx_end;
-        string idx_range_str =
-          (idx_start == idx_end) ?
-          (" (#" + idx_start + ")") :
-          (" (#" + idx_start + "-#" + idx_end + ")");
-        mapping(string:string) new_ca_label =
-          orig_ca_def->display_name() + ([ ]);
-        foreach (new_ca_label; string lang; string label)
-          new_ca_label[lang] += idx_range_str;
-        override_area_label[new_comp_def] = set_label(0, new_ca_label);
+    // The following code should be ~O(n * log(n)).
+    sort(q);
+    for(int i = 0; i < sizeof(q)/10 + 1; i++) {
+      int r = random(sizeof(q));
+      string key_prefix = q[r = random(sizeof(q))];
+      if (!key_prefix) continue;
+      for(;r < sizeof(q); r++,i++) {
+        if (!q[r]) continue;
+        if (!has_prefix(q[r], key_prefix)) break;
+        really_low_expire_entry(q[r]);
+        q[r] = 0;
       }
     }
-
-    mapping(string:mixed) comp_area_rec = orig_ca_def->get_rec();
-    m_delete (comp_area_rec, "component_area_def_id");
-    comp_area_rec->component_def_id = new_comp_def->id();
-    comp_area_rec->size = mappingp (data) ? data->size : 1;
-    comp_area_rec->order = new_order++;
-    if (int override_label_id = override_area_label[new_comp_def])
-      comp_area_rec->label_id = override_label_id;
-
-    comp_area_rec->story_tmpl_def_id = new_def_id;
-    component_area_defs_table()->object_create (comp_area_rec, on_value_error);
   }
 
-  // Copy the component area defs that haven't been used in the
-  // layout. C.f. InfoKOM #771173.
-  foreach ((multiset)base_def->component_area_defs() - used_ca_defs;
-           REP.ComponentAreaDef ca_def;) {
-    mapping(string:mixed) comp_area_rec = ca_def->get_rec();
-    m_delete (comp_area_rec, "component_area_def_id");
-    comp_area_rec->story_tmpl_def_id = new_def_id;
-    component_area_defs_table()->object_create (comp_area_rec, on_value_error);
-  }
+  void set(string url, string data, mapping meta, int expire, RequestID id)
+  {
+    int entry_size = CALC_ENTRY_SIZE (url, data);
 
-  base_def->clear_derived_defs_cache();
-  REP.get_print_module()->clear_cached_tmpl_ids();
-  return new_def;
-}
+    if( entry_size > max_file_size ) {
+      // NOTE: There's a possibility of a stale entry remaining in the
+      //       cache until it expires, rather than being replaced here.
+      SIMPLE_TRACE_ENTER (this, "Result of size %d is too large "
+                          "to store in the protocol cache (limit %d)",
+                          entry_size, max_file_size);
+      SIMPLE_TRACE_LEAVE ("");
+      return;
+    }
 
+    SIMPLE_TRACE_ENTER (this, "Storing result of size %d in the protocol cache "
+                        "using key %O (expire in %ds)",
+                        entry_size, url, expire);
+    string key = url;
 
-void reinstantiate_derived_defs (array(REP.TemplateDef) derived_defs)
-{
-  mapping(int:int) extract_snippet_pg_ids = ([]);
-
-  foreach (derived_defs, REP.TemplateDef def) {
-    if (int pgv_id = def->get ("source_pgv_id")) {
-      REP.PGVersion pgv = pgv_by_id (pgv_id, REP.RETURN_ZERO);
-      if (!pgv) {
-        // The referenced source_pgv_id may have been purged, but a
-        // newer version with the same storage counter may exist
-        // instead.
-        int rev = def->get_revision();
-        array(REP.PGVersion) pgvs_by_cnt = REP.DB.pgvs_by_storage_counter (rev);
-        pgv = sizeof (pgvs_by_cnt) && pgvs_by_cnt[0];
+    foreach(id->misc->vary_cb_order || ({}),
+            string|function(string, RequestID: string|int) vary_cb) {
+      array(string|mapping(string:mixed))|string|
+        function(string, RequestID:string|int) old = cache[key];
+      if (old && (old != vary_cb)) {
+        SIMPLE_TRACE_ENTER (this, "Registering vary cb %O - conflicts with "
+                            "existing entry %s, old entry expired",
+                            vary_cb,
+                            (arrayp (old) ? "of size " + sizeof (old[0]) :
+                             sprintf ("%O", old)));
+        low_expire_entry(key);
+        old = UNDEFINED; // Ensure that current size is updated below.
+        SIMPLE_TRACE_LEAVE ("");
+      }
+      cache[key] = vary_cb;
+      if(!old) {
+        current_size += CALC_VARY_CB_SIZE(key);
       }
 
-      //  Skip trashed template documents
-      if (pgv && pgv->is_placed())
-        extract_snippet_pg_ids[pgv->get ("page_group_id")] = 1;
-    }
-  }
-
-  foreach (extract_snippet_pg_ids; int pg_id;) {
-    // Create a new pgv and resave the document to get a new
-    // deconstruct with potential error messages originating from that
-    // the base def changed.
-    REP.PGVersion cur_pgv = current_pgv_by_pg_id (pg_id);
-    REP.PGVersion new_pgv;
-    do {
-      cur_pgv = cur_pgv->current_pgv();
-      new_pgv = add_pgv (cur_pgv,
-                         -1, // Overwriteable
-                         ([ "comment" : "Base story definition changed" ]));
-      string src_filepath =
-        cur_pgv->get_existing_layout_filepath (REP.RETURN_ZERO) ||
-        cur_pgv->get_unproc_filepath();
-
-      new_pgv->store_file_by_copy (REP.get_print_module()->get_file_db_path() +
-                                   src_filepath,
-                                   REP.Storage.UNPROC_LAYOUT_FILE,
-                                   cur_pgv->layout_mime_type(),
-                                   UNDEFINED,
-                                   UNDEFINED,
-                                   cur_pgv);
-    } while (!REP.DB.make_pgv_current (new_pgv, cur_pgv, REP.RETURN_ZERO));
-  }
-
-  array(REP.TemplateDef) parent_defs =
-    Array.uniq (derived_defs->get_parent()) - ({ 0 });
-
-  parent_defs->clear_derived_defs_cache();
-  REP.get_print_module()->clear_cached_tmpl_ids();
-}
-
-
-protected array(mapping(string:mixed))
-get_lde_metadata_field_list (REP.ComponentDef comp_def)
-// Create metadata fields that will be commited to the DB together
-// with component defintions from XML config.
-{
-  array(mapping(string:mixed)) meta_field_defs = ({});
-
-  string wf_type;
-  if (has_prefix (comp_def->get_class(), "rep.text"))
-    wf_type = "text";
-  else if (has_prefix (comp_def->get_class(), "rep.image"))
-    wf_type = "image";
-
-  if (wf_type) {
-    mapping(string:mixed) field_def = ([]);
-    field_def->name = "__status";
-    field_def->label = ([ "en" : "Status",
-                          "sv" : "Status" ]);
-    field_def->type = "selector";
-
-    array(REP.StatusLevel) levels =
-      REP.get_print_module()->get_status_levels_by_type (wf_type);
-
-    if (levels) {
-      field_def->params =
-        ([ "options" :
-           map (levels,
-                lambda (REP.StatusLevel sl)
-                {
-                  return ([ "name"     : sl->id,
-                            "label_id" :
-                            set_label (0, ([ "en" : sl->display_name ])),
-                            "color"    : sl->color ]);
-                })
-        ]);
-
-      field_def->initial_val = levels[0]->id;
-
-      field_def->para_styles = field_def->char_styles =
-        field_def->table_styles = ([]);
-
-      meta_field_defs += ({ field_def });
-    }
-  }
-
-  return meta_field_defs;
-}
-
-
-REP.ComponentDef create_lde_component_def(int(0..0)|string pub_prefix,
-                                          mapping(string:mixed) fields,
-                                          int config_rev,
-                                          void|REP.OnError on_value_error)
-//!  Creates a new component definition record in the SQL database,
-//!  together with any referenced labels, fields, parameters and
-//!  styles.
-//!
-//!  @param fields
-//!    Component definition structure returned by the LDE config parser.
-{
-  //  Component definition record
-  mapping(string:mixed) comp_rec =
-    ([ "name"               : fields->name,
-       "publication_prefix" : pub_prefix || "",
-       "label_id"           : set_label(0, fields->label),
-       "revision"           : config_rev,
-       "class"              : fields->class ]);
-  REP.ComponentDef comp_def =
-    component_defs_table()->object_create(comp_rec, on_value_error);
-  int comp_def_id = comp_def->id();
-
-  //  Field definitions. Note that these are ordered in the caller's data
-  //  structure by a "pos" member and in the database through the
-  //  auto-increment ID.
-  array(mapping) fields_list =
-    get_lde_metadata_field_list (comp_def) +
-    values(fields->fields);
-  sort(fields_list->pos, fields_list);
-
-  mapping(int:mapping(string:mixed)) data_provider_fields = ([]);
-
-  // Note: if changes are made to this initialization code (field
-  // defs, styles, parameters), make sure copy_field_def reflects the
-  // changes.
-  foreach (fields_list, mapping field_entry) {
-    // Assertions for required items in the entry.
-    ASSERT_IF_DEBUG (field_entry /*%O*/->name, field_entry);
-    ASSERT_IF_DEBUG (field_entry /*%O*/->label, field_entry);
-    ASSERT_IF_DEBUG (field_entry /*%O*/->type, field_entry);
-
-    //  Insert field
-    mapping(string:mixed) field_rec =
-      ([ "component_def_id" : comp_def_id,
-         "name"             : field_entry->name,
-         "label_id"         : set_label(0, field_entry->label),
-         "type"             : field_entry->type ]);
-    if (!zero_type (field_entry->initial_val))
-      field_rec["initial_val"] = field_entry->initial_val;
-    if (!zero_type (field_entry->initial_from_body_style))
-      field_rec["initial_from_body_style"] =
-        field_entry->initial_from_body_style;
-    if (!zero_type (field_entry->initial_from_ac))
-      field_rec["initial_from_ac"] = field_entry->initial_from_ac;
-
-    int field_def_id = field_defs_table()->object_create(field_rec)->id();
-
-    if (!zero_type (field_entry->data_provider_field)) // Mapping.
-      data_provider_fields[field_def_id] = field_entry->data_provider_field;
-
-    //  Parameters
-    if (field_entry->params && sizeof(field_entry->params)) {
-      mapping params = field_entry->params;
-      foreach ((params && params->options) || ({}), mapping options) {
-        mapping label = m_delete (options, "label");
-        if (label) options->label_id = set_label (0, label);
-      }
-
-      set_lde_parameters(field_entry->params, "field", field_def_id);
-    }
-
-    //  Styles. Again ordered by a "pos" member in input and by
-    //  auto-increment ID in the database.
-    array(mapping) style_list =
-      values(field_entry->para_styles || ([])) +
-      values(field_entry->char_styles || ([])) +
-      values (field_entry->table_styles || ([]));
-    sort(style_list->pos, style_list);
-    foreach (style_list, mapping style_entry) {
-      string type;
-      if (style_entry->type == "paragraph")
-        type = "para";
-      else if (style_entry->type == "character")
-        type = "char";
-      else if (style_entry->type == "table")
-        type = "table";
-
-      mapping(string:mixed) style_rec =
-        ([ "field_def_id" : field_def_id,
-           "type"         : type,
-           "name"         : style_entry->name,
-           "label_id"     : set_label(0, style_entry->label),
-           "style_extref" : style_entry->ext,
-           "style_extref_group" : style_entry->ext_group,
-           "css"          : style_entry->css || "",
-           "merge"        : style_entry->merge ]);
-
-      if (string from_style = style_entry->from_style)
-        style_rec->from_body_style = from_style;
-
-      styles_table()->object_create (style_rec);
-    }
-  }
-
-  foreach (data_provider_fields;
-           int field_def_id;
-           mapping(string:mixed) dp_rec) {
-    REP.FieldDef fd = field_def_by_id (field_def_id);
-    REP.FieldDef provider_fd =
-      dp_rec->data_field &&
-      comp_def->field_def_by_name (dp_rec->data_field);
-
-    fd->set_data_provider (provider_fd,
-                           dp_rec->plugin,
-                           dp_rec->key,
-                           dp_rec->format);
-  }
-
-  return comp_def;
-}
-
-REP.ComponentDef create_derived_component_template_def (
-  REP.ComponentDef base_comp_def,
-  REP.PGVersion src_pgv,
-  string src_ext_page_id,
-  int src_page_item_id,
-  string display_name,
-  string snippet,
-  mapping geometry_bounds,
-  mapping(string:array(mapping(string:mixed))) override_styles)
-{
-  mapping(string:mixed) fields = ([
-    "name"               : REP.IDS.mangle_template_name (display_name),
-    "label_id"           : set_label (0, ([ "en": display_name ])),
-    "geometry_snippet"   : snippet,
-    "revision"           : src_pgv->get ("storage_counter"),
-    "parent_id"          : base_comp_def->id(),
-    "source_pgv_id"      : src_pgv->id(),
-    "source_ext_page_id" : src_ext_page_id,
-    "source_page_item_id": src_page_item_id,
-  ]);
-
-  if (string jpeg_raw = REP.IDS.get_snippet_jpeg_preview(snippet))
-    fields["geometry_snippet_preview"] = jpeg_raw;
-  if (geometry_bounds)
-    fields["geometry_snippet_bounds"] = geometry_bounds;
-
-  REP.ComponentDef derived_def = copy_component_def (base_comp_def, fields,
-                                                     override_styles);
-  base_comp_def->clear_derived_defs_cache();
-  REP.get_print_module()->clear_cached_tmpl_ids();
-  return derived_def;
-}
-
-//! Deep copies an existing @[REP.ComponentDef], including associated
-//! @[REP.FieldDef]:s, and returns the copy. If @[fields] is specified,
-//! it is passed on to set_fields() in the newly created
-//! @[REP.Component] instance.
-REP.ComponentDef copy_component_def (REP.ComponentDef src_comp_def,
-  void|mapping(string:mixed) fields,
-  void|mapping(string:array(mapping(string:mixed))) override_styles)
-{
-  REP.ComponentDef new_comp_def = component_defs_table()->create_infant();
-  new_comp_def->verbatim_copy (src_comp_def);
-
-  if (fields)
-    new_comp_def->set_fields (fields);
-
-  component_defs_table()->low_object_create (new_comp_def);
-
-  foreach (src_comp_def->get_field_defs(), REP.FieldDef field_def) {
-    copy_field_def (field_def, new_comp_def->id(), 0, 0,
-                    override_styles && override_styles[field_def->get_name()]);
-  }
-
-  return new_comp_def;
-}
-
-//! Deep copies an existing @[REP.FielDef], including associated
-//! parameters and styles, and returns the copy.
-//!
-//! @param fields
-//!   If specified, it is passed on to set_fields() in the newly
-//!   created @[REP.FieldDef] instance.
-//!
-//! @param params
-//!   If specified, the provided params will be used in the new field
-//!   def, rather than those from @[src_field_def].
-//!
-//! @param styles
-//!   If specified, the provided styles will be used in the new field
-//!   def, rather than those from @[src_field_def]. An exception to this
-//!   are base definition styles declared with the "merge" attribute that
-//!   will be added regardless, though with precedence given to the custom
-//!   style.
-REP.FieldDef copy_field_def (REP.FieldDef src_field_def,
-                             int component_def_id,
-                             void|mapping(string:mixed) fields,
-                             void|mapping(string:mixed) params,
-                             void|array(mapping(string:mixed)) styles)
-{
-  mapping(string:mixed) init_rec = ([]);
-  // Fields we need to be able to instantiate the infant.
-  init_rec->component_def_id = component_def_id;
-  init_rec->type = src_field_def->get_type();
-
-  REP.FieldDef new_field_def =
-    field_defs_table()->create_infant (init_rec);
-
-  new_field_def->verbatim_copy (src_field_def, ([ "component_def_id": 1]));
-
-  if (fields)
-    new_field_def->set_fields (fields - ([ "component_def_id": 1 ]));
-
-  new_field_def = field_defs_table()->low_object_create (new_field_def);
-  int new_def_id = new_field_def->id();
-
-  mapping(string:mixed) new_params;
-  if (params)
-    new_params = params;
-  else
-    new_params = src_field_def->get_raw_parameters();
-
-  if (new_params && sizeof (new_params))
-    set_lde_parameters (new_params, "field", new_def_id);
-
-  array(REP.FieldDef) base_styles =
-    styles_table()->object_select("field_def_id = " + src_field_def->id());
-  array(mapping(string:mixed)) new_styles;
-  if (styles) {
-    new_styles = styles;
-    new_styles->field_def_id = new_def_id;
-
-    //  Merge any styles from the base definition where there isn't any
-    //  definition already provided by the caller. Build a lookup table for
-    //  the new styles so we can quickly determine if an override is present.
-    multiset new_style_keys =
-      (multiset) map(new_styles, lambda(mapping st) {
-                                   return st->type + "|" + st->name;
-                                 });
-    foreach (base_styles, REP.FieldStyle base_style) {
-      if (base_style->get_merge()) {
-        string base_style_key =
-          base_style->get("type") + "|" + base_style->get_name();
-        if (!new_style_keys[base_style_key]) {
-          //  This style specifies merging and has no override
-          mapping(string:mixed) style_rec =
-            base_style->get_rec() - ({ "style_id" });
-          style_rec->field_def_id = new_def_id;
-          new_styles += ({ style_rec });
-        }
-      }
-    }
-  } else {
-    new_styles = ({});
-    foreach (base_styles, REP.FieldStyle base_style) {
-      mapping(string:mixed) style_rec =
-        base_style->get_rec() - ({ "style_id" });
-      style_rec->field_def_id = new_def_id;
-      new_styles += ({ style_rec });
-    }
-  }
-
-  foreach (new_styles, mapping(string:mixed) style_rec)
-    styles_table()->object_create (style_rec);
-
-  return new_field_def;
-}
-
-//! Bumps the revision number of the lde definition with prefix
-//! @[prefix] (zero for the default definition), setting its current
-//! file path to @[file_path].
-int bump_lde_definition (void|string pub_prefix, string file_path)
-{
-  string nice_prefix = pub_prefix || "";
-  string config_rev_counter_name = "lde_conf_rev:" + nice_prefix;
-  REP.Counter counter = REP.get_counter (config_rev_counter_name);
-
-  // Compat code for devel/demo 5.0 installations. Set the new
-  // counter's min value to the maximum value of all old counters to
-  // prevent any revision numbers (in StoryTemplateDefs /
-  // ComponentDefs) from decreasing.
-  Sql.Sql db = REP.get_db();
-  array(mapping(string:mixed)) res =
-    db->query ("SELECT MAX(pos) AS maxpos FROM counters "
-               "WHERE name LIKE 'lde_tmpl_def_rev:%' OR "
-               "      name LIKE 'lde_comp_def_rev:%'");
-
-  if (int maxpos = (int)res[0]->maxpos) {
-    counter->set_min (maxpos);
-  }
-
-  int revision = counter->get();
-
-  REP.CachedTable tbl = lde_defs_table();
-
-  array(mapping(string:mixed)) recs =
-    tbl->cached_select ("prefix = '" + tbl->quote (nice_prefix) + "'");
-
-  ASSERT_IF_DEBUG (sizeof (recs) <= 1);
-
-  mapping(string:mixed) rec;
-  if (sizeof (recs)) {
-    rec = recs[0];
-    rec->filepath = file_path;
-    rec->revision = revision;
-  } else {
-    rec = ([ "prefix"    : nice_prefix,
-             "filepath"  : file_path,
-             "revision"  : revision ]);
-  }
-
-  tbl->cached_insert_or_update (rec);
-
-  REP.get_print_module()->clear_current_lde_def_rev (nice_prefix);
-
-  return revision;
-}
-
-//! Returns the revision of the current LDE definition for the
-//! publication @[pub], or from the default definition if @[pub] is
-//! zero. Returns zero if no LDE definition exists for the publication.
-int current_lde_def_rev (void|REP.Publication pub)
-{
-  string nice_prefix = (pub && pub->get ("prefix")) || "";
-
-  REP.PrintDBModule print_db = REP.get_print_module();
-
-  if (mapping m = print_db->current_lde_def_revs) {
-    int cached_rev = m[nice_prefix];
-    if (!zero_type (cached_rev)) {
-      return cached_rev;
-    }
-  }
-
-  REP.CachedTable tbl = lde_defs_table();
-
-  array(mapping(string:mixed)) recs =
-    tbl->cached_select ("prefix = '" + tbl->quote (nice_prefix) + "'");
-
-  ASSERT_IF_DEBUG (sizeof (recs) <= 1);
-
-  int rev;
-  if (sizeof (recs))
-    rev = recs[0]->revision;
-
-  if (!print_db->current_lde_def_revs) print_db->current_lde_def_revs = ([]);
-  return print_db->current_lde_def_revs[nice_prefix] = rev;
-}
-
-array(REP.StoryTemplateDef)
-derived_story_template_defs_for_publication (int(0..0)|REP.Publication pub,
-                                             void|int include_old_pgvs)
-//! Returns all derived story template defs that are extracted from a
-//! current @[REP.PGVersion].
-//!
-//! @param pub
-//!   If specified, the selection is restricted to that @[REP.Publication].
-//!
-//! @param include_old_pgvs
-//!   If nonzero, templates derived from non-current pgvs will be
-//!   returned. (Currently used by
-//!   REP.LDE.ConfigParser.save_definitions().)
-//!
-//! Note: derived defs that have a non-current parent template def
-//! will also be returned, so such filtering needs to be performed
-//! separately.
-{
-  return derived_template_defs_for_publication (story_tmpl_defs_table(),
-                                                pub,
-                                                include_old_pgvs);
-}
-
-array(REP.ComponentDef)
-derived_component_defs_for_publication (int(0..0)|REP.Publication pub,
-                                             void|int include_old_pgvs)
-//! Returns all derived component defs that are extracted from a
-//! current @[REP.PGVersion].
-//!
-//! @param pub
-//!   If specified, the selection is restricted to that @[REP.Publication].
-//!
-//! @param include_old_pgvs
-//!   If nonzero, templates derived from non-current pgvs will be
-//!   returned. (Currently used by
-//!   REP.LDE.ConfigParser.save_definitions().)
-//!
-//! Note: derived defs that have a non-current parent template def
-//! will also be returned, so such filtering needs to be performed
-//! separately.
-{
-  return derived_template_defs_for_publication (component_defs_table(),
-                                                pub,
-                                                include_old_pgvs);
-}
-
-protected array(REP.TemplateDef)
-derived_template_defs_for_publication (REP.DBTable tbl,
-                                       int(0..0)|REP.Publication pub,
-                                       void|int include_old_pgvs)
-{
-  array(REP.Edition) tmpl_editions = ({});
-  // If no "pub" argument is given it means the default publication,
-  // so we'll have to loop over the templates in all publications.
-  foreach (pub ? ({ pub }) : list_publications(), REP.Publication p) {
-    if (!p->get("is_deleted"))
-      tmpl_editions += editions_in_publication (p, 1);
-  }
-
-  // Collect the storage counters of all page versions from
-  // non-deleted page slots in non-deleted template issues.  Might
-  // look somewhat heavy compared to the older SQL-only query, but
-  // we need this logic to avoid template documents that are
-  // assigned to deleted page slots and so on. Besides, we're only
-  // looping through template editions and the result is cached.
-  multiset(int) tmpl_pgv_storage_cnt = (<>);
-  foreach (tmpl_editions, REP.Edition ed) {
-    foreach (ed->page_slots(), REP.PageSlot slot) {
-      if (REP.Page page = slot->page()) {
-        REP.PGVersion cur_pgv = page->pgv();
-
-        array(REP.PGVersion) process_pgvs = ({});
-        if (include_old_pgvs) {
-          process_pgvs = pgvs_by_pg_id (cur_pgv->get ("page_group_id"));
+      SIMPLE_TRACE_ENTER (this, "Registering vary cb %O", vary_cb);
+
+      string key_frag;
+      if (stringp(vary_cb)) {
+        string|array(string) header = id->request_headers[vary_cb];
+        if (arrayp(header)) key_frag = header * ",";
+        else key_frag = header;
+      } else {
+        int|string frag = vary_cb(url, id);
+        if (intp(frag) && frag) {
+          key_frag = frag->digits(256);
         } else {
-          if (cur_pgv->get ("markup_error")) {
-            // Find the most current PGVersion that doesn't have markup errors.
-
-            // First we'll try with a limit of 5 to avoid getting
-            // (potentially) lots of unnecessary PGVersions. If the version
-            // we're looking for isn't found, we'll retry with a limit of 0
-            // (unlimited).
-            constant first_try_limit = 5;
-          find_latest_pgv:
-            for (int limit = first_try_limit;
-                 limit >= 0;
-                 limit -= first_try_limit) {
-              int got_pgvs;
-              foreach (cur_pgv->all_versions (limit),
-                       REP.PGVersion old_pgv) {
-                got_pgvs++;
-                if (old_pgv->is_valid_file (REP.Storage.LAYOUT_FILE) &&
-                    !old_pgv->get ("markup_error")) {
-                  process_pgvs = ({ old_pgv });
-                  break find_latest_pgv;
-                }
-              }
-              if (got_pgvs < first_try_limit)
-                break;
-            }
-          } else {
-            process_pgvs = ({ cur_pgv });
-          }
+          key_frag = frag;
         }
-
-        foreach (process_pgvs, REP.PGVersion pgv)
-          tmpl_pgv_storage_cnt[pgv->get ("storage_counter")] = 1;
       }
+
+      SIMPLE_TRACE_LEAVE ("Vary cb resolved to key fragment %O",
+                          key_frag || "");
+
+      if (key_frag)
+        // Avoid spoofing if key_frag happens to contain "\0\0".
+        key_frag = replace (key_frag, "\0", "\0\1");
+      else key_frag = "";
+      key += "\0\0" + key_frag;
+      entry_size += 2 + sizeof(key_frag);
     }
-  }
 
-  // Note: derived templates use the storage counter of the
-  // PGVersion they got created from as their revision.
-  array(REP.TemplateDef) derived_defs = ({});
-  string sql_publ = objectp(pub) ? tbl->quote(pub->get ("prefix")) : "";
-  foreach ((array)tmpl_pgv_storage_cnt / 200.0, array(int) chunk) {
-    derived_defs += tbl->
-      object_select ("publication_prefix = '" + sql_publ + "' AND "
-                     "parent_id <> 0 AND "
-                     "revision IN (" + (((array(string))chunk) * ",") + ")");
-  }
-  return derived_defs;
-}
-
-array(REP.StoryTemplateDef)
-story_template_defs_for_publication_low (int(0..0)|REP.Publication pub)
-//! Returns the most recent versions of all story templates for the
-//! given publication, or from the default definition if @[pub] is
-//! zero.
-{
-  return template_defs_for_publication_low (story_tmpl_defs_table(), pub);
-}
-
-protected array(REP.TemplateDef)
-template_defs_for_publication_low (REP.DBTable tbl,
-                                   int(0..0)|REP.Publication pub)
-{
-  string pub_prefix = objectp(pub) ? pub->get("prefix") : "";
-  string sql_publ = tbl->quote (pub_prefix);
-
-  int lde_def_rev = current_lde_def_rev (pub);
-  string cache_key = tbl->table + ":" + (pub_prefix || "") + ":" +
-    (string)lde_def_rev;
-
-  array(int) ids = REP.get_print_module()->cached_tmpl_ids_for_key (cache_key);
-
-  if (!ids) {
-    array(int) base_ids = tbl->
-      select1 (tbl->id_col,
-               "publication_prefix = '" + sql_publ + "' AND "
-               "revision = '" + (string)lde_def_rev + "' AND "
-               "parent_id = 0");
-
-    array(REP.TemplateDef) derived_defs =
-      derived_template_defs_for_publication (tbl, pub);
-
-    derived_defs = filter (derived_defs,
-                           lambda (REP.TemplateDef def)
-                           {
-                             return has_value (base_ids,
-                                               def->get ("parent_id"));
-                           });
-
-    // Perhaps it seems kind of strange to get the objects, extract
-    // the ids and then do object_get_multi() below, but we need to
-    // put the ids into the cache. The objects will be instantiated
-    // regardless, so it isn't that much loss.
-    array(int) derived_ids = derived_defs->id();
-
-    ids = base_ids + derived_ids;
-    REP.get_print_module()->set_cached_tmpl_ids_for_key (cache_key, ids);
-  }
-
-  return tbl->object_get_multi (ids);
-}
-
-
-array(REP.StoryTemplateDef)
-story_template_defs_for_publication(int(0..0)|REP.Publication pub)
-//! Returns the most recent versions of all story templates for the
-//! given publication @[pub] including inherited global ones that
-//! aren't overridden.
-{
-  array(REP.StoryTemplateDef) res = ({ });
-  mapping(string:int) name_used = ([ ]);
-  foreach ((pub ? story_template_defs_for_publication_low(pub) : ({ }) ) +
-           story_template_defs_for_publication_low(0),
-           REP.StoryTemplateDef tmpl_def) {
-    //  For global story templates there is an option to limit their
-    //  visibility by adding a property that list all the valid publication
-    //  prefixes.
-    if (pub && !tmpl_def->check_visibility_in_publication(pub))
-      continue;
-
-    string name = tmpl_def->get_name();
-    if (!name_used[name]) {
-      name_used[name] = 1;
-      res += ({ tmpl_def });
+    array(string|mapping(string:mixed))|string|
+      function(string, RequestID:string) old = cache[key];
+    if (old) {
+      SIMPLE_TRACE_LEAVE ("Entry conflicts with existing entry %s, "
+                          "old entry expired",
+                          (arrayp (old) ? "of size " + sizeof (old[0]) :
+                           sprintf ("%O", old)));
+      low_expire_entry(key);
     }
-  }
-  return res;
-}
+    else
+      SIMPLE_TRACE_LEAVE ("");
 
+    current_size += entry_size;
+    cache[key] = ({ data, meta });
 
-mapping ext_tmpl_defs_for_publ(REP.Publication pub,
-                               void|int(0..1) exclude_derived,
-                               void|int(0..1) exclude_ad_hoc,
-                               void|REP.PGVersion pgv_context)
-//! Returns a mapping structure with the most recent template definitions
-//! available in the given publication @[pub], including default definitions
-//! that are inherited by all publications. The structure is intended for
-//! delivery to InDesign (both EP Connector and Server) where it's used to
-//! check template issues for markup errors.
-//!
-//! For more info on @[pgv_context], see StoryTemplateDef.ext_tmpl_def.
-{
-  ASSERT_IF_DEBUG(pub);
-  mapping(string:REP.StoryTemplateDef) story_tmpl_defs = ([ ]);
-
-  foreach (story_template_defs_for_publication(pub),
-           REP.StoryTemplateDef tmpl_def) {
-    if (exclude_derived && tmpl_def->is_derived()) continue;
-    if (exclude_ad_hoc && tmpl_def->is_ad_hoc()) continue;
-    story_tmpl_defs[tmpl_def->get_name()] = tmpl_def;
+    // Only the actual cache entry is expired.
+    // FIXME: This could lead to lots and lots of call outs.. :P
+    meta->co_handle =
+      (expire < CACHE_INDEF_REL_LIMIT) &&
+      call_out(really_low_expire_entry, expire, key);
+    int n;
+    while( (current_size > max_size) && (n++<10))
+      clear_some_cache();
   }
 
-  mapping(string:REP.ComponentDef) comp_defs = ([]);
-  foreach (component_defs_for_publication (pub),
-           REP.ComponentDef comp_def) {
-    //  We currently have no client-side use of auto-created components,
-    //  i.e. those that are added in derived story templates, since we'll
-    //  only output a minimal record below anyway.
-    if (comp_def->is_auto_created())
-      continue;
+  array(string|mapping(string:mixed)) get(string url, RequestID id)
+  {
+    SIMPLE_TRACE_ENTER (this, "Looking up entry for %O in the protocol cache",
+                        url);
 
-    if (exclude_derived && comp_def->is_derived()) continue;
-    if (exclude_ad_hoc && comp_def->is_ad_hoc()) continue;
-    comp_defs[comp_def->get_name()] = comp_def;
-  }
-
-  mapping(string:mapping(string:mixed)) ext_story_tmpl_defs =
-    map (story_tmpl_defs,
-         lambda (REP.StoryTemplateDef tmpl_def)
-         {
-           //  Get template without internal fields (e.g. "__status"),
-           //  and minimize fields for derived defs to reduce size.
-           int is_derived = tmpl_def->is_derived();
-           return tmpl_def->ext_tmpl_def(1, pgv_context, is_derived);
-         });
-
-  mapping(string:mapping(string:mixed)) ext_comp_defs =
-    map (comp_defs,
-         lambda (REP.ComponentDef comp_def)
-         {
-           //  Only produce a minimal structure that contains component def
-           //  fields that roxen.js currently needs.
-           return comp_def->ext_comp_def (1, pgv_context, 1);
-         });
-
-  //  List all known publication prefixes so we can validate prefix visibility
-  //  lists in story designators.
-  array(string) all_prefixes = list_publications()->get("prefix");
-
-  int is_tmpl = pgv_context && pgv_context->edition()->is_template();
-
-  return ([ "story_tmpl_defs":      ext_story_tmpl_defs,
-            "component_defs":       ext_comp_defs,
-            "publication_prefixes": all_prefixes,
-            "is_template_edition" : is_tmpl ]);
-}
-
-array(REP.ComponentDef)
-component_defs_for_publication_low (int(0..0)|REP.Publication pub)
-//! Returns the most recent versions of all component definitions for
-//! the given publication, or from the default definition if @[pub] is
-//! zero.
-{
-  return template_defs_for_publication_low (component_defs_table(), pub);
-}
-
-array(REP.ComponentDef)
-component_defs_for_publication(int(0..0)|REP.Publication pub)
-//! Returns the most recent versions of all component definitions for
-//! the given publication @[pub] including inherited global ones
-//! that aren't overridden, but excluding internal (orphaned) definitions.
-{
-  array(REP.ComponentDef) res = ({ });
-  mapping(int:mapping(string:int)) name_used = ([ ]);
-  foreach (({ pub ? component_defs_for_publication_low(pub) : ({ }),
-              component_defs_for_publication_low(0) });
-           int i;
-           array(REP.ComponentDef) comp_defs) {
-    name_used[i] = ([]);
-    foreach (comp_defs, REP.ComponentDef comp_def) {
-      // Exclude internal component definitions added to handle extra
-      // fields. Also exclude defs from the global definition that have
-      // been overridden in the publication-specific
-      // definition. However, we'll still allow multiple components
-      // with the same name/identifier as long as they all come from
-      // either the global definition level or the
-      // publication-specific level. Multiple components with the same
-      // name may be the result of story templates with style
-      // extraction enabled, for example (where the derived component
-      // doesn't really have a specific name, it's just a copy of the
-      // base component but with different style definitions).
-      string name = comp_def->get_name();
-      if (!(has_prefix(name, "internal-") || (i && name_used[0][name]))) {
-        name_used[i][name] = 1;
-        res += ({ comp_def });
+    array(string|mapping(string:mixed))|string|
+      function(string, RequestID:string|int) res;
+    string key = url;
+    while(1) {
+      id->misc->protcache_cost++;
+      if (arrayp(res = cache[key])) {
+        hits++;
+        SIMPLE_TRACE_LEAVE ("Found entry of size %d", sizeof (res[0]));
+        return [array(string|mapping(string:mixed))]res;
       }
-    }
-  }
-  return res;
-}
+      if (!res) {
+        misses++;
+        SIMPLE_TRACE_LEAVE ("Found no entry");
+        return UNDEFINED;
+      }
 
-REP.ComponentDef
-component_def_for_publication_low(int(0..0)|REP.Publication pub,
-                                  string comp_name,
-                                  int|void comp_revision)
-//!  Fetches a component definition by name for the given publication, or
-//!  from the default definition if publication isn't given. A specific
-//!  revision number may be provided; if left out the most recent definition
-//!  is returned.
-//!
-//!  Note that individual component definitions are normally accessed via
-//!  their owning story template, i.e. @[StoryTemplateDef.get_component_defs].
-//!  It is only for "orphaned" components that no longer can be resolved
-//!  through the story's current template that this query is necessary.
-{
-  string pub_prefix = objectp(pub) ? pub->get("prefix") : "";
-  REP.ObjectTable tbl = component_defs_table();
-  if (comp_revision) {
-    //  Direct access using publication, name and revision
-    array(REP.ComponentDef) res =
-      tbl->object_select("publication_prefix = '" +
-                         tbl->quote(pub_prefix) + "' "
-                         "AND name = '" + tbl->quote(comp_name) + "' "
-                         "AND revision = " + comp_revision);
-    if (sizeof (res))
-      return res[0];
-  } else {
-    foreach (component_defs_for_publication_low (pub), REP.ComponentDef comp)
-      if (comp->get_name() == comp_name)
-        return comp;
+      SIMPLE_TRACE_ENTER (this, "Found vary cb %O", res);
+
+      string key_frag;
+      if (stringp(res)) {
+        string|array(string) header = id->request_headers[res];
+        if (arrayp(header)) key_frag = header * ",";
+        else key_frag = header;
+      } else {
+        int|string frag = res(url, id);
+        if (intp(frag) && frag) {
+          key_frag = frag->digits(256);
+        } else {
+          key_frag = frag;
+        }
+      }
+
+      SIMPLE_TRACE_LEAVE ("Vary cb resolved to key fragment %O",
+                          key_frag || "");
+
+      if (key_frag)
+        // Avoid spoofing if key_frag happens to contain "\0\0".
+        key_frag = replace (key_frag, "\0", "\0\1");
+      else key_frag = "";
+      key += "\0\0" + key_frag;
+    };
   }
 
-  return 0;
-}
-
-REP.ComponentDef component_def_for_publication (REP.Publication pub,
-                                                string comp_name,
-                                                int|void comp_revision,
-                                                void|REP.OnError on_not_found)
-//!  Fetches a component definition by name for the given publication
-//!  with fallback to the default definition if it isn't found in the
-//!  given one. A specific revision number may be provided; if left
-//!  out the most recent definition is returned.
-//!
-//!  Note that individual component definitions are normally accessed via
-//!  their owning story template, i.e. @[StoryTemplateDef.get_component_defs].
-//!  It is only for "orphaned" components that no longer can be resolved
-//!  through the story's current template that this query is necessary.
-{
-  ASSERT_IF_DEBUG(pub);
-  return
-    component_def_for_publication_low (pub, comp_name, comp_revision) ||
-    component_def_for_publication_low (0, comp_name, comp_revision) ||
-    REP.raise_err (on_not_found,
-                   "No component %O%s in publication %O.\n",
-                   comp_name,
-                   comp_revision ? " with revision " + comp_revision : "",
-                   pub->get ("prefix"));
-}
-
-
-protected REP.ComponentDef get_shared_orphan_component_def(REP.Publication pub)
-//! Returns (and creates if not available) the orphan component definition
-//! which is used to add extra fields that don't belong in any other
-//! definition.
-{
-  //  The "internal-" prefix is an indicator we can filter on later. The
-  //  revision is hard-coded to 1.
-  string orphan_def_name = "internal-orphan-comp-def";
-  REP.ComponentDef res =
-    component_def_for_publication_low(pub, orphan_def_name, 1);
-  if (!res) {
-    //  Add component definition
-    mapping orphan_fields = ([ "name"   : orphan_def_name,
-                               "label"  : ([ "en" : "Orphan Field Def" ]),
-                               "class"  : "rep.text.internal",
-                               "fields" : ({ }) ]);
-    res =
-      create_lde_component_def(pub->get("prefix"), orphan_fields, 1,
-                               REP.RETURN_ZERO);
+  void init_from_variables( )
+  {
+    max_size = query( "data_cache_size" ) * 1024;
+    max_file_size = query( "data_cache_file_max_size" ) * 1024;
+    if( max_size < max_file_size )
+      max_size += max_file_size;
+    int n;
+    while( (current_size > max_size) && (n++<10))
+      clear_some_cache();
   }
-  return res;
-}
 
-
-REP.FieldDef add_orphan_field_def(REP.Publication pub, mapping field_label,
-                                  string field_type)
-{
-  //  Add field def to orphan component def
-  REP.ComponentDef orphan_def = get_shared_orphan_component_def(pub);
-  mapping(string:mixed) field_rec =
-    ([ "component_def_id" : orphan_def->id(),
-       "name"             : "internal-" + Standards.UUID.make_version4()->str(),
-       "label_id"         : set_label(0, field_label),
-       "type"             : field_type ]);
-  int field_def_id = field_defs_table()->object_create(field_rec)->id();
-  orphan_def->invalidate_field_defs();
-  return field_def_by_id(field_def_id, REP.RETURN_ZERO);
-}
-
-
-REP.FieldDef field_def_factory (REP.ObjectTable tbl, int new_rec,
-                                mapping(string:mixed) rec)
-// Registered as DBObject factory callback in story_items_table().
-{
-  // Index constants in REP.LDE through -> instead of . to work around
-  // cyclic resolver problems.
-  program obj_prog = REP.LDE->field_type_classes[rec->type];
-  if (!obj_prog) {
-    ASSERT_IF_DEBUG (REP.LDE->field_to_mime_type[rec->type /*%O*/], rec->type);
-    obj_prog = REP.FieldDef;
+  protected void create()
+  {
+    init_from_variables();
   }
-  return obj_prog (!new_rec && rec, tbl);
 }
 
-REP.FieldDef field_def_by_id(int field_def_id,
-                             void|REP.OnError on_rec_not_found)
-{
-  REP.ObjectTable tbl = field_defs_table();
-  return tbl->object_get(field_def_id, on_rec_not_found);
-}
 
-REP.ComponentDef component_def_by_id(int component_def_id,
-                                     void|REP.OnError on_rec_not_found)
-{
-  REP.ObjectTable tbl = component_defs_table();
-  return tbl->object_get(component_def_id, on_rec_not_found);
-}
+class DataCache {
+  inherit DataCacheImpl;
 
-REP.ComponentAreaDef
-component_area_def_by_id(int component_area_def_id,
-                         void|REP.OnError on_rec_not_found)
-{
-  REP.ObjectTable tbl = component_area_defs_table();
-  return tbl->object_get(component_area_def_id, on_rec_not_found);
-}
+  constant AUTH_PUBL = "AUTH |";
+  constant PUBL_ONLY = "";
 
-REP.StoryTemplateDef story_template_def_by_id(int story_tmpl_def_id,
-                                              void|REP.OnError on_rec_not_found)
-{
-  REP.ObjectTable tbl = story_tmpl_defs_table();
-  return tbl->object_get(story_tmpl_def_id, on_rec_not_found);
-}
-
-REP.StoryTemplateDef story_template_def_for_publication_low(
-  int|REP.Publication pub,
-  string tmpl_id,
-  int|void tmpl_revision,
-  int|void base_def_only)
-//!  Fetches a story template by name (which is a ID string) for the
-//!  given publication, or from the default definition if publication
-//!  isn't given. A specific revision number may be provided; if left
-//!  out the most recent definition is returned (which may be stale,
-//!  i.e. not present in the most recent definition.)
-{
-  string pub_prefix = "";
-  if (intp(pub) && pub)
-    pub = publication_by_id(pub);
-  if (objectp(pub))
-    pub_prefix = pub->get("prefix");
-
-  REP.ObjectTable tbl = story_tmpl_defs_table();
-  array(REP.StoryTemplateDef) res;
-  if (tmpl_revision) {
-    //  Direct access using publication, id and revision
-    res =
-      tbl->object_select("publication_prefix = '" + tbl->quote(pub_prefix) + "' "
-                         "AND name = '" + tbl->quote(tmpl_id) + "' "
-                         "AND revision = " + tmpl_revision +
-                         (base_def_only ? " AND parent_id = 0" : ""));
-  } else {
-    // Use cached objects. This saves an SQL query per call to this
-    // function (and it is called frequently at times).
-    res = filter (story_template_defs_for_publication_low (pub),
-                  lambda (REP.StoryTemplateDef def) {
-                    if (base_def_only && def->is_derived())
-                      return 0;
-
-                    return def->get_name() == tmpl_id;
-                  });
+  void expire_entry(string key_prefix, RequestID|void id)
+  {
+    //  Expire both authenticated and non-authenticated entries
+    ::expire_entry(AUTH_PUBL + key_prefix, id);
+    ::expire_entry(PUBL_ONLY + key_prefix, id);
   }
-  return sizeof(res) && res[0];
-}
 
-REP.StoryTemplateDef story_template_def_for_publication(
-  int|REP.Publication pub,
-  string tmpl_id,
-  int|void tmpl_revision,
-  void|REP.OnError on_rec_not_found)
-//!  Fetches a story template by name (which is a ID string) for the
-//!  given publication with fallback to the default definition if publication
-//!  isn't given. A specific revision number may be provided; if left
-//!  out the most recent definition is returned (which may be stale,
-//!  i.e. not present in the most recent definition.)
-{
-  //  Fetch data with fallback to global definitions. Any errors will be
-  //  handled according to caller's wishes below.
-  //  in low-level function
-  REP.StoryTemplateDef tmpl_def =
-    story_template_def_for_publication_low(pub, tmpl_id, tmpl_revision) ||
-    story_template_def_for_publication_low(0, tmpl_id, tmpl_revision);
-  if (!tmpl_def) {
-    if (tmpl_revision) {
-      return REP.raise_err(on_rec_not_found,
-                           "Story template %q version %d not found.\n",
-                           tmpl_id, tmpl_revision);
+  void set(string url, string data, mapping meta, int expire, RequestID id)
+  {
+    if (id->rawauth) {
+      //  If this is an authenticated request that is flagged as cacheable
+      //  we should offer it to all future requests regardless of auth
+      //  status.
+      //
+      //  We could technically drop the PUBL_ONLY copy, but expiring it may
+      //  kill subresources that have been built earlier so let's keep it
+      //  in two places. (The data strings are shared anyway.)
+      ::set(AUTH_PUBL + url, data, meta, expire, id);
+      ::set(PUBL_ONLY + url, data, meta, expire, id);
     } else {
-      return REP.raise_err(on_rec_not_found,
-                           "Story template %q not found.\n", tmpl_id);
+      //  If no authentication is present we only set/replace the PUBL_ONLY
+      //  entry. We don't need to expire the AUTH entry since it will either
+      //  be valid or expired manually from the outside.
+      ::set(PUBL_ONLY + url, data, meta, expire, id);
     }
   }
-  return tmpl_def;
-}
 
-REP.StoryTemplateDef
-story_template_base_def_for_publication (int|REP.Publication pub,
-                                         string tmpl_id,
-                                         void|int tmpl_revision,
-                                         void|REP.OnError on_rec_not_found)
-//! Identical to @[story_template_def_for_publication], except that it
-//! only returns base definitions (i.e. non-derived).
-{
-  //  Fetch data with fallback to global definitions. Any errors will be
-  //  handled according to caller's wishes below.
-  //  in low-level function
-  REP.StoryTemplateDef tmpl_def =
-    story_template_def_for_publication_low(pub, tmpl_id, tmpl_revision, 1) ||
-    story_template_def_for_publication_low(0, tmpl_id, tmpl_revision, 1);
-  if (!tmpl_def) {
-    if (tmpl_revision) {
-      return REP.raise_err(on_rec_not_found,
-                           "Story template %q version %d not found.\n",
-                           tmpl_id, tmpl_revision);
-    } else {
-      return REP.raise_err(on_rec_not_found,
-                           "Story template %q not found.\n", tmpl_id);
+  array(string|mapping(string:mixed)) get(string url, RequestID id)
+  {
+    //  Only non-authenticated requests may search the PUBL_ONLY compartment.
+    //  If we don't get a hit we'll proceed to the second get() below, but
+    //  we then need to adjust the failed lookup statistics to not count
+    //  this twice.
+    mixed res = UNDEFINED;
+    if (!id->rawauth) {
+      res = ::get(PUBL_ONLY + url, id);
+      if (!res)
+        misses--;
     }
+
+    //  Anyone can search the AUTH_PUBL compartment
+    return res || ::get(AUTH_PUBL + url, id);
   }
-  return tmpl_def;
 }
 
-array(REP.StoryTemplateDef) derived_story_template_defs_by_base_def (
-  REP.StoryTemplateDef base_def)
+
+#include "rxml.pike";
+constant    store = roxen.store;
+constant    retrieve = roxen.retrieve;
+constant    remove = roxen.remove;
+
+int config_id;
+int get_config_id()
 {
-  REP.ObjectTable tbl = story_tmpl_defs_table();
-  return tbl->object_select ("parent_id = " + base_def->id());
+  if(config_id) return config_id;
+  for(int i=sizeof(roxen->configurations); i;)
+    if(roxen->configurations[--i]->name==name) return config_id=i;
 }
 
-//
-// Story stuff below
-//
-
-array(REP.Story) list_stories(void|REP.Edition|REP.PGVersion selection,
-                              void|int deleted,
-                              void|int start_timestamp,
-            void|int end_timestamp)
-//! Lists stories based on a selection.
-//!
-//! @param selection
-//!   If the selection is a @[REP.Edition], all stories that have
-//!   appearances in that edition are returned. If the selection is a
-//!   @[REP.PGVersion], all stories that have appearances on that page
-//!   group are returned. (Both cases disregard the stories' home
-//!   publication).
-//!
-//! @param deleted
-//!   If non-zero, deleted stories are returned instead of non-deleted.
-//!
-//! @param start_timestamp
-//!   If non-zero, only stories modified after this time will be listed. Value
-//!   is inclusive so stories modified exactly at this time are also included.
-//!
-//! @param end_timestamp
-//!   If non-zero, only stories not modified after this time will be listed.
-//!   Value is exclusive so stories modified exactly at this time will not be
-//!   included.
+string get_doc_for( string region, string variable )
 {
-  REP.Edition edition;
-
-  array(string) where = ({ (deleted ? "delete_at > 0" : "delete_at = 0") });
-  array(string) refs = ({ });
-  array(REP.Story) ret;
-
-  if (!selection) {
-    werror ("REP.DB.list_stories(): Warning - listing ALL stories.\n");
+  RoxenModule module;
+  if(variable[0] == '_')
+    return 0;
+  if((int)reverse(region))
+    return 0;
+  if(module = find_module( region ))
+  {
+    if(module->variables[variable])
+      return module->variables[variable]->name()+
+        "\n"+module->variables[ variable ]->doc();
   }
-  else if (selection->is_rep_edition) {
-    edition = selection;
+  if(variables[ variable ])
+    return variables[variable]->name()+
+      "\n"+variables[ variable ]->doc();
+}
 
-    where += ({ "edition_id = '" + edition->id() + "'" });
-    refs += ({ "INNER JOIN story_apps USING (story_id)" });
-  } else {
-    ASSERT_IF_DEBUG (selection->is_rep_pgv);
-    ret = selection->stories (!!deleted, 1);
+string query_internal_location(RoxenModule|void mod)
+{
+  string ret = internal_location+(mod?replace(otomod[mod]||"", "#", "!")+"/":"");
+  if (has_suffix(ret, "!0/")) {
+    // Special case for module copy #0.
+    ret = ret[..<sizeof("!0/")] + "/";
   }
-
-  if (start_timestamp) {
-    where += ({ sprintf ("IFNULL(stories.date_modified, stories.date_created) "
-                         ">= FROM_UNIXTIME(%d)", start_timestamp) });
-  }
-
-  if (end_timestamp) {
-    where += ({ sprintf ("IFNULL(stories.date_modified, stories.date_created) "
-       "< FROM_UNIXTIME(%d)", end_timestamp) });
-  }
-
-  if (!ret)
-    ret = stories_table()->object_select(where * " AND ",
-                                         refs * " ");
-
-  // FIXME? Stories can currently have appearances in editions
-  // belonging to different publications.
-  //
-  // ASSERT_IF_DEBUG (!sizeof (ret) || !edition ||
-  // 		   equal (Array.uniq (ret->get ("publication_id")),
-  // 			  ({ edition->publication()->id() })));
-
   return ret;
 }
 
-array(REP.Story) list_stack_stories (REP.Publication|REP.Edition selection,
-                                     void|int deleted,
-                                     void|int start_timestamp)
-//! Lists stories that have appearances in a publication or edition
-//! stack (regardless of the stories' home publication in the case of
-//! an edition stack.)
-//!
-//! @param selection
-//!   If the selection is a @[REP.Publication], all stories on the
-//!   publication stack are returned. If the selection is a
-//!   @[REP.Edition], all stories on the edition stack are returned.
-//!
-//! @param deleted
-//!   If non-zero, deleted stories are returned instead of non-deleted.
+string query_name()
 {
-  ASSERT_IF_DEBUG (selection->is_rep_publication || selection->is_rep_edition);
-  return selection->stack_stories (deleted, start_timestamp);
+  if(strlen(query("name")))
+    return query("name");
+  return name;
 }
 
-int|array(REP.Story) list_stories_by_assignee_low (int|string|RequestID id_spec,
-                                                   void|REP.Edition edition,
-                                                   void|REP.Publication publ,
-                                                   void|int deleted,
-                                                   void|int start_timestamp,
-                                                   void|REP.OnError user_not_found,
-                                                   void|int count_only)
+string comment()
 {
-  int user_id = REP.get_session()->mac->id_get_id (id_spec);
-
-  if (!user_id)
-    return REP.raise_err(user_not_found, "No user found from %O.\n", id_spec);
-
-  REP.ObjectTable tbl = stories_table();
-
-  array(string) where = ({
-    "assignments.user_id = " + user_id,
-    ("assignments.entity_type = '" +
-     tbl->quote (REP.Types.assignment_type_story) + "'"),
-  });
-
-  array(string) joins = ({
-    "INNER JOIN assignments ON stories.story_id = assignments.entity_id "
-  });
-
-  if (edition) {
-    where += ({ "story_apps.edition_id = " + edition->id() });
-    joins += ({ "INNER JOIN story_apps USING (story_id) " });
-  }
-
-  if (deleted) {
-    where += ({ "delete_at > 0" });
-  } else {
-    where += ({ "delete_at = 0" });
-  }
-
-  if (start_timestamp) {
-    where += ({ sprintf ("IFNULL(stories.date_modified, stories.date_created) "
-                         " >= FROM_UNIXTIME(%d)", start_timestamp) });
-  }
-
-  if (count_only) {
-    //  We avoid object_select since these items needn't be brought into RAM
-    array rec = tbl->select1("COUNT(*) AS num", where * " AND ", joins * " ");
-    return rec && rec[0];
-  }
-
-  array(REP.Story) stories =
-    tbl->object_select(where * " AND ",
-                       joins * " ");
-
-  return stories;
+  return query("comment");
 }
 
-array(REP.Story) list_stories_by_assignee (int|string|RequestID id_spec,
-                                           void|REP.Edition edition,
-                                           void|REP.Publication publ,
-                                           void|int deleted,
-                                           void|int start_timestamp,
-                                           void|REP.OnError user_not_found)
+private float cached_compat_level;
+
+float compat_level()
 {
-  return list_stories_by_assignee_low(id_spec, edition, publ, deleted,
-                                      start_timestamp, user_not_found, 0);
+  if (cached_compat_level == 0.0)
+    cached_compat_level = (float) query ("compat_level");
+  return cached_compat_level;
 }
 
-int count_stories_by_assignee(int|string|RequestID id_spec,
-                                           void|REP.Edition edition,
-                                           void|REP.Publication publ,
-                                           void|int deleted,
-                                           void|int start_timestamp,
-                                           void|REP.OnError user_not_found)
+/* A 'pri' is one of the ten priority objects. Each one holds a list
+ * of modules for that priority. They are all merged into one list for
+ * performance reasons later on.
+ */
+
+array(int) query_oid()
 {
-  return list_stories_by_assignee_low(id_spec, edition, publ, deleted,
-                                      start_timestamp, user_not_found, 1);
+  return SNMP.RIS_OID_WEBSERVER + ({ 2 });
 }
 
-REP.Story story_by_id (int story_id, void|REP.OnError on_rec_not_found)
-//! Returns an existing story object based on the story id. It is an
-//! error if there is no story with the given id. The value of
-//! @[on_rec_not_found] determines how this error is handled by this
-//! method.
-//!
 //! @returns
-//!        An existing story object or 0, if no story with the given id exists.
+//!   Returns an array with two elements:
+//!   @array
+//!     @elem array(int) oid
 //!
-//! @seealso
-//!   @[story_by_uuid()]
+//!     @elem array(int) oid_suffix
+//!   @endarray
+array(int) generate_module_oid_segment(RoxenModule me)
 {
-  REP.ObjectTable tbl = stories_table();
-  return tbl->object_get(story_id, on_rec_not_found);
+  string s = otomod[me];
+  array(string) a = s/"#";
+  return ({ sizeof(a[0]), @((array(int))a[0]), ((int)a[1]) + 1 });
 }
 
-REP.Story story_by_uuid (string story_uuid, void|REP.OnError on_rec_not_found)
-//! Returns an existing story object based on the story uuid. It is an
-//! error if there is no story with the given uuid. The value of
-//! @[on_rec_not_found] determines how this error is handled by this
-//! method.
+ADT.Trie generate_module_mib(array(int) oid,
+                             array(int) oid_suffix,
+                             RoxenModule me,
+                             ModuleInfo moduleinfo,
+                             ModuleCopies module)
+{
+  array(int) segment = generate_module_oid_segment(me);
+  return SNMP.SimpleMIB(oid,
+                        oid_suffix + segment,
+                        ({
+                          UNDEFINED,
+                          SNMP.Integer(segment[-1], "moduleCopy"),
+                          SNMP.String(otomod[me],
+                                      "moduleIdentifier"),
+                          SNMP.Integer(moduleinfo->type,
+                                       "moduleType"),
+                          SNMP.String(me->cvs_version || "",
+                                      "moduleVersion"),
+                        }));
+}
+
+// Cache some configuration variables.
+private int sub_req_limit = 30;
+private string internal_location = "/_internal/";
+
+#ifdef HTTP_COMPRESSION
+int(0..1) http_compr_enabled;
+mapping(string:int) http_compr_main_mimes = ([]);
+mapping(string:int) http_compr_exact_mimes = ([]);
+int http_compr_minlen;
+int http_compr_maxlen;
+int(0..1) http_compr_dynamic_reqs;
+Thread.Local gz_file_pool = Thread.Local();
+#endif
+
+int handler_queue_timeout;
+
+// The logging format used. This will probably move to the above
+// mentioned module in the future.
+private mapping (int|string:string) log_format = ([]);
+
+//! The modules sorted with regards to priority and type.
+private array(RoxenModule) sorted_modules = ({});
+
+//! NB: May contain junk in the high-order bits.
+private array(int) sorted_module_types = ({});
+
+mapping modules = ([]);
+//! All enabled modules in this site.
+//! The format is "module":{ "copies":([ num:instance, ... ]) }
+
+mapping (RoxenModule:string) otomod = ([]);
+//! A mapping from the module objects to module names
+
+int module_set_counter = 1;
+//! Incremented whenever the set of enabled modules changes, or if a
+//! module is reloaded.
+
+mapping(string:int) counters = ([]);
+
+// Caches to speed up the handling of the module search.
+// They are all sorted in priority order, and created by the functions
+// below.
+private array (function) url_module_cache, last_module_cache;
+private array (function) logger_module_cache, first_module_cache;
+private array (function) filter_module_cache;
+private array (array (string|function)) location_module_cache;
+private mapping (string:array (function)) file_extension_module_cache=([]);
+private mapping (string:array (RoxenModule)) provider_module_cache=([]);
+private array (RoxenModule) auth_module_cache, userdb_module_cache;
+
+private int module_sort_key(RoxenModule me)
+{
+  int pri = me->query("_priority");
+  array(int|string) info = me->register_module();
+  return (pri << 32) | (info[0] & MODULE_TYPE_MASK);
+}
+
+private void sort_modules()
+{
+  sorted_module_types = map(sorted_modules, module_sort_key);
+  sort(sorted_module_types, sorted_modules);
+  sorted_module_types = map(sorted_module_types, `&, MODULE_TYPE_MASK);
+  invalidate_cache();
+}
+
+// Generic lookup function for the various module caches.
+private array(function|RoxenModule) low_module_lookup(int module_type_mask,
+                                                      string|void symbol)
+{
+  array(RoxenModule) modules =
+    reverse(filter(sorted_modules,
+                   map(sorted_module_types, `&, module_type_mask)));
+  if (!symbol) return modules;
+  return modules[symbol] - ({ 0 });
+}
+
+void unregister_urls()
+{
+  foreach( registered_urls + failed_urls, string url )
+    roxen.unregister_url(url, this_object());
+  registered_urls = ({});
+}
+
+private mapping(RoxenModule:ModuleChangedMonitor)
+  module_changed_monitors = ([]);
+
+#if constant(Filesystem.Monitor.symlinks)
+
+private class ModuleChangedMonitor
+{
+  inherit Filesystem.Monitor.symlinks;
+
+  protected constant default_max_dir_check_interval = 60;
+  protected constant default_file_interval_factor = 1;
+  protected constant default_stable_time = 0;
+
+  RoxenModule mod;
+
+  void create(RoxenModule mod)
+  {
+    ::create();
+    set_nonblocking(1);
+    this::mod = mod;
+  }
+
+  bool is_called = false;
+  void stable_data_change(string p, Stdio.Stat st) {
+    // This will be called on server start, so skip that.
+    if (!is_called) {
+      is_called = true;
+      return;
+    }
+
+    if (mod) {
+      mod = reload_module(mod->module_local_id());
+    }
+  }
+}
+
+void register_module_hot_reload(RoxenModule mod)
+//! Hot-reload a module when the source file is changed, e.g. reload the module
+//! automatically without having to click the Reload button in the Admin
+//! Interface.
 //!
-//! @returns
-//!        An existing story object or 0, if no story with the given id exists.
+//! This will only have effect if the server is started with @tt{--debug@} or
+//! @tt{--module-debug@} (@tt{--once@}). This can also be initalized from the
+//! command line with @tt{./start --once --module-hot-reload=my-module@}, which
+//! is the preferred way of enabling hot reload.
 //!
-//! @seealso
-//!   @[story_by_id()]
+//! @param mod
+//!  The module to enable hot reloading for
 {
-  REP.ObjectTable tbl = stories_table();
-  REP.Story story = story_by_id (rec_id_by_uuid (tbl, story_uuid),
-                                 REP.RETURN_ZERO);
+#if defined(DEBUG) || defined(MODULE_DEBUG) || defined(MODULE_HOT_RELOAD)
 
-  if (story)
-    return story;
-
-  return REP.raise_err(on_rec_not_found,
-                       "Record uuid '%s' not found in %s.\n",
-                       story_uuid, tbl->table);
-}
-
-array(REP.Story) get_story_branch_collection(REP.Story story)
-{
-  //  A collection of branched stories will all point to the same parent
-  //  story ID. If the given story has a parent ID that value is the one
-  //  to use (since parent pointers should never be chained multiple
-  //  levels); if none is found we assume the story itself is the parent of
-  //  the collection.
-  //
-  //  Note that it's possible that the top-level story is deleted or
-  //  inaccessible for other reasons, but its ID is a valid collection
-  //  identifier regardless.
-  //
-  //  Also note that the result always includes the given story unless it's
-  //  flagged as deleted. The result is not sorted.
-  int main_story_id = story->get("parent") || story->id();
-
-  REP.ObjectTable tbl = stories_table();
-  array(int) branch_ids =
-    tbl->select1("story_id", ({ "parent = " + main_story_id }) ) +
-    ({ main_story_id });
-  return filter(map(branch_ids, REP.DB.story_by_id, REP.RETURN_ZERO),
-                lambda(REP.Story s) {
-                  return !s->get("delete_at");
-                });
-}
-
-string get_ext_id_for_story_branch(string base_ext_id, REP.Story story)
-{
-  //  Takes an external ID and appends a suffix to make it specific to a
-  //  given story instance (which typically will be the branched story in
-  //  a Z/E sub-edition). If the story is branched repeatedly we don't
-  //  want to grow the external ID so any earlier suffix is removed first.
-  return base_ext_id && ((base_ext_id / "|ze:")[0] + "|ze:" + story->id());
-}
-
-void set_story_branch_parent(REP.Story branch_story, REP.Story parent_story,
-                             void|mapping(string:int) map_id_output)
-{
-  //  It's not valid to have a story reference itself
-  if (branch_story == parent_story)
+  // Already monitored
+  if (module_changed_monitors[mod]) {
     return;
+  }
 
-  //  Avoid creating a chain of branch IDs by reusing the parent's branch
-  //  pointer if available.
-  int top_branch_story_id = parent_story->get("parent") || parent_story->id();
-  branch_story->set_fields( ([ "parent": top_branch_story_id ]) );
+  ModuleChangedMonitor fsw;
+  // Is this one of these "relying on the interpret lock"?
+  fsw = module_changed_monitors[mod] = ModuleChangedMonitor(mod);
 
-  //  If the parent story was imported from an external writer we need to
-  //  construct a new set of external ID references that connect the items
-  //  in the new story as well.
-  //
-  //  A prerequisite is that we are passed a mapping of old to new IDs for
-  //  the story and the SIVs. This mapping is collected in calls to
-  //  copy_story() and copy_story_item().
-  if (map_id_output) {
-    //  Check if any importer claims ownership of the parent story. We need
-    //  this to find the correct external ID namespace.
-    if (mapping importer_info =
-        REP.StoryImport.get_importer_info(parent_story)) {
-      string ns = importer_info->namespace;
-      string origin_type = importer_info->origin_type;
-      SqlTools.SqlTable uuids_table = external_ids_table();
+  string path = roxen->filename(mod);
 
-      //  Duplicate external record for parent story
-      ASSERT_IF_DEBUG(map_id_output["story:" + parent_story->id()]);
-      foreach (external_ids_for_dbobj(parent_story, ns), string ext_id) {
-        string branch_ext_id =
-          get_ext_id_for_story_branch(ext_id, branch_story);
-        array(string) branch_origin_ext_ids =
-          origin_external_ids_for_dbobj(parent_story, ns);
-        lookup_or_add_external_id(branch_story,
-                                  ns,
-                                  branch_ext_id,
-                                  (sizeof(branch_origin_ext_ids) &&
-                                   branch_origin_ext_ids[0]),
-                                  origin_type);
-      }
+  if (!fsw->is_monitored(path)) {
+    report_debug(" Adding hot reload monitor for %O.\n", mod);
+    fsw->monitor(path);
+  }
 
-      //  Duplicate external records for parent story items (unversioned)
-      foreach (map_id_output; string parent_si_key; int branch_si_id) {
-        sscanf(parent_si_key, "si:%d", int parent_si_id);
-        if (!parent_si_id)
-          continue;
-        mapping parent_si_rec = ([ "story_item_id": parent_si_id ]);
-        mapping branch_si_rec = ([ "story_item_id": branch_si_id ]);
+#endif // defined(...)
+}
 
-        foreach (external_ids_for_dbobj(parent_si_rec, ns), string si_ext_id) {
-          string branch_si_ext_id =
-            get_ext_id_for_story_branch(si_ext_id, branch_story);
-          lookup_or_add_external_id(branch_si_rec, ns, branch_si_ext_id);
-        }
+void unregister_module_hot_reload(RoxenModule mod)
+//! Unregister the hot reload monitor for module @[mod].
+{
+  if (ModuleChangedMonitor mon = m_delete(module_changed_monitors, mod)) {
+    report_debug("Removing hot reload monitor for %O.\n", mod);
+    mon->clear();
+    destruct(mon);
+  }
+}
 
-        //  Restore story item "origin" field that is cleared in standard
-        //  story item copying.
-        if (REP.SIVersion parent_siv =
-            current_siv_by_si_id(parent_si_id, REP.RETURN_ZERO)) {
-          if (string parent_siv_origin = parent_siv->get_unver("origin")) {
-            if (REP.SIVersion branch_siv =
-                current_siv_by_si_id(branch_si_id, REP.RETURN_ZERO)) {
-              branch_siv->set_unver_fields( ([ "origin": parent_siv_origin ]) );
+#else /* Filesystem.Monitor.symlinks */
+
+//! @ignore
+private class ModuleChangedMonitor {}
+void register_module_hot_reload(RoxenModule mod){}
+void unregister_module_hot_reload(RoxenModule mod){}
+//! @endignore
+
+#endif /* !Filesystem.Monitor.symlinks */
+
+
+private void safe_stop_module (RoxenModule mod, string desc)
+{
+  if (mixed err = catch (mod && mod->stop &&
+                         call_module_func_with_cbs (mod, "stop", 0)))
+    report_error ("While stopping " + desc + ": " + describe_backtrace (err));
+
+  unregister_module_hot_reload(mod);
+}
+
+private Thread.Mutex stop_all_modules_mutex = Thread.Mutex();
+
+private void do_stop_all_modules (Thread.MutexKey stop_lock)
+{
+  foreach(sorted_modules, RoxenModule m) {
+    safe_stop_module(m, "module");
+  }
+
+  end_logger();
+
+  destruct (stop_lock);
+}
+
+void stop (void|int asynch)
+//! Unregisters the urls and calls stop in all modules. Uses a handler
+//! thread to lessen the impact if a module hangs. Doesn't wait for
+//! all modules to finish if @[asynch] is nonzero.
+{
+  if (Thread.MutexKey lock = stop_all_modules_mutex->trylock()) {
+#ifdef SNMP_AGENT
+    if(query("snmp_process") && objectp(roxen->snmpagent)) {
+      roxen->snmpagent->vs_stop_trap(get_config_id());
+      roxen->snmpagent->del_virtserv(get_config_id());
+    }
+#endif
+
+    unregister_urls();
+
+    if (roxen.handler_threads_on_hold())
+      // Run do_stop_all_modules synchronously if there are no handler
+      // threads running (typically during the RoxenTest_help self test).
+      do_stop_all_modules (lock);
+    else
+      // Seems meaningless to queue this in a handler thread and then
+      // just wait for it below if asynch isn't set - could just as
+      // well do the work in this thread then. But now isn't a good
+      // moment to mess around with it. /mast
+      roxen.handle (do_stop_all_modules, lock);
+  }
+
+  if (!asynch) stop_all_modules_mutex->lock (1);
+  destruct(json_logger);
+}
+
+string|array(string) type_from_filename( string file, int|void to,
+                                         string|void myext )
+{
+  array(string)|string tmp;
+  if(!types_fun)
+    return to?({ "application/octet-stream", 0 }):"application/octet-stream";
+
+  string ext = lower_case(myext || Roxen.extension(file));
+
+  if(tmp = types_fun(ext))
+  {
+    // FIXME: Ought to support several levels of "strip".
+    if (tmp[0] == "strip")
+    {
+      array(string) tmp2 = file/".";
+      string nx;
+      if (sizeof(tmp2) > 2)
+        nx = lower_case(tmp2[-2]);
+      tmp[0] = (nx && types_fun(nx)) || types_fun("default") ||
+        "application/octet-stream";
+    }
+  } else if (!(tmp = types_fun("default"))) {
+    tmp = ({ "application/octet-stream", 0 });
+  }
+  return to?tmp:tmp[0];
+}
+
+array (RoxenModule) get_providers(string provides)
+//! Returns an array with all provider modules that provides "provides".
+{
+  // This cache is cleared in the invalidate_cache() call.
+  if(!sizeof(provider_module_cache))
+  {
+    provider_module_cache[0] = 0;	// Initialization sentinel.
+    int prev_pri = -1;
+    array(RoxenModule) modules = ({});
+    foreach(low_module_lookup(MODULE_PROVIDER), RoxenModule me) {
+      if (!me->query_provides) continue;
+      int pri = me->query("_priority");
+      if (pri != prev_pri) {
+        sort(modules->module_identifier(), modules);
+        foreach(modules, RoxenModule p) {
+          mixed provs = p->query_provides();
+          if (stringp(provs)) {
+            provs = (< provs >);
+          } else if (arrayp(provs)) {
+            provs = mkmultiset(provs);
+          }
+          if (provs) {
+            foreach(provs; string provides;) {
+              provider_module_cache[provides] += ({ p });
             }
           }
         }
+        modules = ({});
       }
+      prev_pri = pri;
+      modules += ({ me });
     }
-  }
-}
-
-bool unlink_story_branch(REP.Story story, bool clear_title_suffix)
-{
-  bool is_ok = false;
-
-  //  Can only unlink the story that acts as the parent of a collection
-  if (story->get("parent")) {
-    //  Clear parent pointer and optionally title suffix
-    mapping fields = ([ "parent": 0 ]);
-    if (clear_title_suffix)
-      fields["title_suffix"] = 0;
-    story->set_fields(fields);
-    is_ok = true;
-  }
-
-  //  Remove any external writer bindings by searching for such namespaces
-  //  in the external ID table. This is supported also if the story wasn't
-  //  part of a collection.
-  if (mapping importer_info = REP.StoryImport.get_importer_info(story)) {
-    if (string ns = importer_info->namespace) {
-      foreach (external_ids_for_dbobj(story, ns), string story_ext_id) {
-        remove_external_id(ns, story_ext_id);
+    sort(modules->module_identifier(), modules);
+    foreach(modules, RoxenModule p) {
+      mixed provs = p->query_provides();
+      if (stringp(provs)) {
+        provs = (< provs >);
+      } else if (arrayp(provs)) {
+        provs = mkmultiset(provs);
       }
-      foreach (story->current_items(), REP.SIVersion siv) {
-        mapping si_rec = siv->get_rec_unver();
-        foreach (external_ids_for_dbobj(si_rec, ns), string si_ext_id) {
-          remove_external_id(ns, si_ext_id);
+      if (provs) {
+        foreach(provs; string provides;) {
+          provider_module_cache[provides] += ({ p });
         }
-
-        //  Also clear origin field
-        siv->set_unver_fields( ([ "origin": UNDEFINED ]) );
       }
-
-      is_ok = true;
     }
   }
-
-  return is_ok;
+  return provider_module_cache[provides] || ({});
 }
 
-
-REP.Story create_story (REP.Publication publ,
-                        REP.StoryTemplateDef story_tmpl_def,
-                        void|mapping(string:mixed) init_values,
-                        void|REP.OnError on_value_error)
-//! Creates a new story and returns the resulting story object.
-//!
-//! @param story_tmpl_def
-//!   The @[REP.StoryTemplateDef] to use.
-//!
-//! @param init_values
-//!   Initial low-level values to set in the created story.
-//!
-//! @param on_value_error
-//!   What to do if invalid init_values were encountered.
-//!
-//! @seealso
-//! @[copy_story]
+RoxenModule get_provider(string provides)
+//! Returns the first provider module that provides "provides".
 {
-  ASSERT_IF_DEBUG (publ->id());
-  ASSERT_IF_DEBUG (story_tmpl_def);
-  ASSERT_IF_DEBUG (story_tmpl_def->id());
-
-  init_values = init_values || ([]);
-  init_values->publication = publ;
-
-  init_values->story_tmpl_def = story_tmpl_def;
-
-  REP.Story story =
-    stories_table()->object_create (init_values, on_value_error);
-  if (!story) return 0;
-
-  // Make a super stack appearance.
-  story_apps_table()->insert ((["story_id": story->id(),
-                                "edition_id": Val.null]));
-
-  story->invalidate_appearances();
-  story->publication()->invalidate_story_appearances();
-  REP.get_print_module()->notify_story_apps_changed (story,
-                                                     story->publication());
-
-
-  mapping(string:mixed) si_ver_fields = ([]);
-  if (!zero_type (init_values->user_id))
-    si_ver_fields->user_id = init_values->user_id;
-
-  foreach (story_tmpl_def->component_area_defs(),
-           REP.ComponentAreaDef ca_def) {
-    for (int i = 0; i < ca_def->size(); i++) {
-      REP.SIVersion siv =
-        create_story_item (story,
-                           ca_def->component_def(),
-                           ([ "component_area_def" : ca_def,
-                              "comp_area_order"       : i+1 ]),
-                           si_ver_fields + ([]) );
-      make_siv_current (siv, 0);
-    }
-  }
-
-  return story;
+  array (RoxenModule) prov = get_providers(provides);
+  if(sizeof(prov))
+    return prov[0];
+  return 0;
 }
 
-REP.Story copy_story (REP.Story src, void|REP.Publication dst_publ,
-                      void|mapping(string:int) map_id_output)
-//! Creates a copy of the story @[src], including its current items.
-//! The copy only gets a super stack appearance - use @[add_story_app]
-//! afterwards for other appearances. The copy keeps the same story
-//! template as the original.
-//!
-//! @param src
-//!   The story to copy.
-//!
-//! @param dst_publ
-//!   The publication to create the copy in. Defaults to the same
-//!   publication as @[src]. Note that the copy keeps the story
-//!   template even if it doesn't exist in @[dst_publ] - it might need
-//!   to be converted afterwards.
-//!
-//! @returns
-//!   Returns the new copy.
+array(mixed) map_providers(string provides, string fun, mixed ... args)
+//! Maps the function "fun" over all matching provider modules.
 {
-  if (!dst_publ) dst_publ = src->publication();
-
-  REP.ObjectTable tbl = stories_table();
-  REP.Story story = tbl->create_infant();
-  story->verbatim_copy (src, ([ "date_created" : 1 ]));
-
-  //  We leave the "parent" field untouched so we don't accidentally create
-  //  any branch relationship. The caller will have to set this separately if
-  //  needed.
-  story->set_fields ((["publication": dst_publ,
-                       "story_uuid": Standards.UUID.make_version4()->str(),
-                       "date_created": time(),
-                       "user_id": REP.get_session()->user_id(),
-                       "deleted": 0]));
-
-  story = tbl->low_object_create (story);
-  if (map_id_output)
-    map_id_output["story:" + src->id()] = story->id();
-
-  //  Copy assignees
-  foreach (src->get_assignees(), int user_id)
-    story->add_assignee(user_id, REP.RETURN_ZERO);
-
-  //  Copy categories
-  array(REP.Category) copy_categories = ({ });
-  foreach (src->get_categories(1, 0), REP.Story.Category c) {
-    REP.Category copy_c = REP.Category(c->get("story_category"),
-                                       c->get("is_main"),
-                                       c->get("priority"));
-    copy_categories += ({ copy_c });
-  }
-  if (sizeof(copy_categories))
-    story->add_categories(copy_categories, REP.RETURN_ZERO);
-
-  // Make a super stack appearance.
-  story_apps_table()->insert ((["story_id": story->id(),
-                                "edition_id": Val.null]));
-
-  foreach (src->current_items(), REP.SIVersion src_siv)
-    make_siv_current (copy_story_item (src_siv, story, 0, map_id_output));
-
-  return story;
-}
-
-void copy_stories_between_page_groups (
-  REP.PGVersion src_pgv,
-  REP.PGVersion dst_pgv,
-  void|int deep_copy,
-  void|mapping(int:int) remap_story_doc_ids,
-  void|int reset_placements,
-  void|int only_remapped_stories)
-//! Copies all stories appearing in the page group designated by
-//! @[src_pgv] to the page group for @[dst_pgv]. Does nothing if the
-//! two objects belong to the same page group.
-//!
-//! If @[deep_copy] is set, the stories are always copied completely
-//! using @[copy_story], otherwise new appearances are added to the
-//! same stories if possible (i.e. if @[src_pgv] and @[dst_pgv] is in
-//! the same publication).
-//!
-//! If @[remap_story_doc_ids] is provided (as a mapping), the
-//! story_doc_ids contained in it will be remapped when story
-//! appearances are copied between the page groups. This is used by
-//! e.g. the IDS merge_contents operation when it needs to remap
-//! story_doc_ids in the merged document due to conflicts.
-//!
-//! If @[reset_placements] is non-zero, any "placed" markers and
-//! story_doc_ids will be reset when appearances are copied.
-//!
-//! By setting @[only_remapped_stories] we only copy or add new appearances
-//! to stories listed in @[remap_story_doc_ids] instead of all source page
-//! stories.
-{
-  if (src_pgv->get("page_group_id") == dst_pgv->get("page_group_id"))
-    return;
-
-  REP.Edition dst_ed = dst_pgv->edition();
-
-  //  Disallow adding of appearances to template editions
-  if (dst_ed->is_template())
-    return;
-
-  array(REP.Story) src_stories = src_pgv->stories (0, 1);
-
-  mapping(int:REP.Story) stories_by_doc_ids = src_pgv->stories_by_doc_ids();
-  mapping(REP.Story:int) doc_ids_by_story =
-    mkmapping (values (stories_by_doc_ids),
-               indices (stories_by_doc_ids));
-
-  if (!deep_copy) {
-    //  Despite what the defvar name says the setting affects copying between
-    //  issues within as well as outside of a publication.
-    deep_copy =
-      src_pgv->edition() != dst_ed &&
-      REP.get_print_module()->query ("deep_story_copying_between_publs");
-  }
-
-  multiset(REP.Story) dst_pgv_stories = (multiset)dst_pgv->stories (-1, 1);
-
-  foreach (src_stories, REP.Story src) {
-    int skip_unmapped = 0;
-    if (only_remapped_stories && remap_story_doc_ids)
-      skip_unmapped = !remap_story_doc_ids[doc_ids_by_story[src]];
-    if (dst_pgv_stories[src] || skip_unmapped)
+  array (RoxenModule) prov = get_providers(provides);
+  mixed error;
+  array a=({ });
+  mixed m;
+  foreach(prov, RoxenModule mod)
+  {
+    if(!objectp(mod))
       continue;
+    if(functionp(mod[fun]))
+      error = catch(m=mod[fun](@args));
+    if(error) {
+      report_debug("Error in map_providers(): " + describe_backtrace(error));
+    }
+    else
+      a += ({ m });
+    error = 0;
+  }
+  return a;
+}
 
-    REP.Story story;
-    if (deep_copy) {
-      story = copy_story (src, dst_ed->publication());
-    } else {
-      story = src;
-    }
-    int story_doc_id = doc_ids_by_story[src];
-    if (int remapped = (remap_story_doc_ids &&
-                        remap_story_doc_ids[story_doc_id])) {
-      story_doc_id = remapped;
-    }
-    if (!reset_placements && story_doc_id) {
-      add_story_app (story, dst_ed, dst_pgv, 1, story_doc_id);
-    } else {
-      add_story_app (story, dst_ed, dst_pgv);
+mixed call_provider(string provides, string fun, mixed ... args)
+//! Maps the function "fun" over all matching provider modules and
+//! returns the first positive response.
+{
+  foreach(get_providers(provides), RoxenModule mod)
+  {
+    function f;
+    if(objectp(mod) && functionp(f = mod[fun])) {
+      mixed ret;
+      if (ret = f(@args)) {
+        return ret;
+      }
     }
   }
 }
 
-int add_story_app(REP.Story story,
-                  REP.Edition edition,
-                  void|REP.PGVersion pgv,
-                  void|int is_placed,
-                  void|int story_doc_id)
-//! Adds a story appearance for a story, if none exists already.
+array(function) file_extension_modules(string ext)
+{
+  if (!sizeof(file_extension_module_cache)) {
+    file_extension_module_cache[0] = 0;	// Initialization sentinel.
+    foreach(low_module_lookup(MODULE_FILE_EXTENSION), RoxenModule me) {
+      if (!me->handle_file_extension) continue;
+      array(string) arr = me->query_file_extensions();
+      foreach(arr, string e) {
+        file_extension_module_cache[e] += ({ me->handle_file_extension });
+      }
+    }
+  }
+  return file_extension_module_cache[ext];
+}
+
+array(function) url_modules()
+{
+  if(!url_module_cache)
+  {
+    url_module_cache = low_module_lookup(MODULE_URL, "remap_url");
+  }
+  return url_module_cache;
+}
+
+protected mapping api_module_cache = ([]);
+mapping api_functions(void|RequestID id)
+{
+  return api_module_cache+([]);
+}
+
+array (function) logger_modules()
+{
+  if(!logger_module_cache)
+  {
+    logger_module_cache = low_module_lookup(MODULE_LOGGER, "log");
+  }
+  return logger_module_cache;
+}
+
+array (function) last_modules()
+{
+  if(!last_module_cache)
+  {
+    last_module_cache = low_module_lookup(MODULE_LAST, "last_resort");
+  }
+  return last_module_cache;
+}
+
+protected mixed strip_fork_information(RequestID id)
+{
+  if (uname()->sysname == "Darwin") {
+    //  Look for Mac OS X special filenames that are used access files in
+    //  magic ways:
+    //
+    //    foo.txt/..namedfork/data     (same as foo.txt)
+    //    foo.txt/..namedfork/rsrc     (resource fork of foo.txt)
+    //    foo.txt/rsrc                 (resource fork of foo.txt)
+    if (has_value(id->not_query, "..namedfork/") ||
+        has_suffix(id->not_query, "/rsrc"))
+      //  Skip elaborate error page since we get these e.g. for WebDAV
+      //  mounts in OS X Finder.
+      return Roxen.http_status(404, "No such file.");
+  }
+
+  array a = id->not_query/"::";
+  //  FIX: Must not subtract ":" chars since it breaks proper URL:s,
+  //  e.g. "/internal-roxen-colorbar:x,y,z" and several others.
+  //  id->not_query = a[0]-":";
+  id->not_query = a[0];
+  id->misc->fork_information = a[1..];
+  return 0;
+}
+
+array (function) first_modules()
+{
+  if(!first_module_cache)
+  {
+    first_module_cache = ({ });
+
+    //  Add special fork handlers on Windows and Mac OS X
+    if (
+#ifdef __NT__
+        1 ||
+#endif
+        uname()->sysname == "Darwin") {
+      first_module_cache += ({
+        strip_fork_information,	// Always first!
+      });
+    }
+
+    first_module_cache += low_module_lookup(MODULE_FIRST, "first_try");
+  }
+
+  return first_module_cache;
+}
+
+void set_userdb_module_cache( array to )
+// Used by the config_filesystem.pike module to enforce the usage of
+// the config userdb module, for now.
+{
+  userdb_module_cache = to;
+}
+
+array(UserDB) user_databases()
+{
+  if( userdb_module_cache )
+    return userdb_module_cache;
+  return userdb_module_cache = low_module_lookup(MODULE_USERDB);
+}
+
+array(AuthModule) auth_modules()
+{
+  if( auth_module_cache )
+    return auth_module_cache;
+  return auth_module_cache = low_module_lookup(MODULE_AUTH);
+}
+
+array location_modules()
+//! Return an array of all location modules the request should be
+//! mapped through, by order of priority.
+{
+  if(!location_module_cache)
+  {
+    array new_location_module_cache=({ });
+    int prev_pri = -1;
+    array level_find_files = ({});
+    array(string) level_locations = ({});
+    foreach(low_module_lookup(MODULE_LOCATION), RoxenModule me) {
+      int pri = me->query("_priority");
+      if (pri != prev_pri) {
+        //  Order after longest prefix length
+        sort(map(level_locations,
+                 lambda(string loc) { return -sizeof(loc); }),
+             level_locations, level_find_files);
+        foreach(level_locations; int i; string path) {
+          new_location_module_cache += ({ ({ path, level_find_files[i] }) });
+        }
+        level_locations = ({});
+        level_find_files = ({});
+      }
+      prev_pri = pri;
+      // FIXME: Should there be a catch() here?
+      string location = me->find_file && me->query_location();
+      if (!location) continue;
+      level_find_files += ({ me->find_file });
+      level_locations += ({ location });
+    }
+
+    sort(map(level_locations,
+             lambda(string loc) { return -sizeof(loc); }),
+         level_locations, level_find_files);
+    foreach(level_locations; int i; string path) {
+      new_location_module_cache += ({ ({ path, level_find_files[i] }) });
+    }
+    location_module_cache = new_location_module_cache;
+  }
+  return location_module_cache;
+}
+
+array(function) filter_modules()
+{
+  if(!filter_module_cache)
+  {
+    filter_module_cache = low_module_lookup(MODULE_FILTER, "filter");
+  }
+  return filter_module_cache;
+}
+
+void end_logger()
+{
+  if (mixed err = catch {
+      if (roxen.LogFile logger =
+          log_function && function_object (log_function)) {
+        logger->close();
+      }
+    }) report_error ("While stopping the logger: " + describe_backtrace (err));
+  log_function = 0;
+}
+
+void init_log_file()
+{
+  end_logger();
+  // Only try to open the log file if logging is enabled!!
+  if(query("Log"))
+  {
+    string logfile = query("LogFile");
+    if(strlen(logfile))
+      log_function = roxen.LogFile(logfile,
+                                   query("LogFileCompressor"),
+                                   [int] query("DaysToKeepLogFiles"))->write;
+  }
+}
+
+private void parse_log_formats()
+{
+  array foo=query("LogFormat")/"\n";
+  log_format = ([]);
+  foreach(foo; int i; string b)
+    if(strlen(b) && b[0] != '#') {
+      if (sscanf (b, "%d:%*[\t ]%s", int status, b))
+        log_format[status] = b;
+      else if (sscanf (b, "*:%*[\t ]%s", b))
+        log_format[0] = b;
+      else if (sscanf (b, "%[-_.#a-zA-Z0-9*]/%[-_.#a-zA-Z0-9*]:%*[\t ]%s",
+                       string facility, string action, b) >= 2)
+        log_format[facility + "/" + action] = b;
+      else
+        // Ought to be an error when the variable is set, but that's
+        // not entirely backward compatible.
+        report_warning ("Unrecognized format on line %d "
+                        "in log format setting: %O\n", i + 1, b);
+    }
+}
+
+void log(mapping file, RequestID request_id)
+{
+  // Call all logging functions
+  array(function) log_funs = logger_module_cache||logger_modules();
+  if (sizeof(log_funs)) {
+    request_id->init_cookies(1);
+    foreach(log_funs, function f)
+      if( f( request_id, file ) )
+        return;
+  }
+
+  if( !log_function )
+    return; // No file is open for logging.
+
+  if(do_not_log_patterns &&
+     Roxen._match(request_id->remoteaddr, do_not_log_patterns))
+    return;
+
+  string form;
+  if(!(form=log_format[(int) file->error]))
+    form = log_format[0];
+  if(!form) return;
+
+  roxen.run_log_format( form, log_function, request_id, file );
+}
+
+void log_event (string facility, string action, string resource,
+                void|mapping(string:mixed) info)
+//! Log an event.
 //!
-//! @param story
-//!   The story to add the appearance for.
+//! This function is primarily intended for logging arbitrary internal
+//! events for performance monitoring purposes. The events are sent to
+//! the access log, where they typically are formatted in a CommonLog
+//! lookalike format.
 //!
-//! @param edition
-//!   The edition to add the appearance for. If unset, it will be looked
-//!   up from @[pgv]. Note that template editions are not accepted for
-//!   appearances.
+//! The intention is to extend this function to be able to collect
+//! statistics of these events for polling by e.g. SNMP.
 //!
-//! @param pgv
-//!   The page group to add the appearance for. If unset, the
-//!   appearance will be added to the edition stack of @[edition].
+//! @param facility
+//!   An identifier for the module or subsystem that the event comes
+//!   from. This defaults to the module identifier returned by
+//!   @[RoxenModule.module_local_id] when the @[RoxenModule.log_event]
+//!   wrapper is used. It should be unique within the configuration.
+//!   Valid characters are @expr{[-_.#a-zA-Z0-9]@} but the first
+//!   character has to be alphanumeric.
 //!
-//! @param is_placed
-//!   Sets the is_placed flag in the appearance. Applicable only if
-//!   @[pgv] is given.
+//! @param action
+//!   An identifier for the specific event within the facility. Should
+//!   be enumerable. Valid characters are @expr{[-_.#a-zA-Z0-9]@}.
 //!
-//! @param story_doc_id
-//!   Sets the story_doc_id (the unique id of this story in a page file)
-//!   for this appearance.
+//! @param resource
+//!   Identifies the resource that the event acts on. Pass zero if a
+//!   resource isn't applicable.
 //!
-//! @returns
-//!   Returns the id of the story_app_parts record for the appearance,
-//!   regardless whether a new one was created or not. If the edition is
-//!   a template edition we exit early with @expr{0@} as the result.
+//!   If applicable, this is the path within the virtual file system
+//!   of the module, beginning with a "@expr{/@}".
+//!
+//!   Otherwise it is some other string, not beginning with
+//!   "@expr{/@}", that has a format suitable for describing the
+//!   resource handled by the facility, e.g. "@expr{pclass:17@}".
+//!
+//!   This string should preferably contain URI valid chars only, but
+//!   other chars are allowed and will be encoded if necessary.
+//!
+//! @param info
+//!   An optional mapping containing arbitrary info about the event.
+//!   The entries here can be accessed as @expr{$@} format specifiers
+//!   in the @expr{LogFormat@} configuration variable.
+//!
+//!   The values must be castable to strings. The strings should
+//!   preferably contain URI valid chars only, but other chars are
+//!   allowed and will be encoded if necessary.
+//!
+//!   The strings should preferably never be empty. If a string might
+//!   be, it should be documented in the doc blurb for the
+//!   @expr{LogFormat@} configuration variable.
+//!
+//!   Most but not all of the predefined format specifiers can be
+//!   overridden this way, but if any is overridden it should map very
+//!   closely to the syntax and semantics of the original.
+//!
+//!   Note that "@expr{_@}" cannot be used in names in the indices
+//!   here since the log formatter code replaces "@expr{_@}" with
+//!   "@expr{-@}" before doing lookups.
 //!
 //! @note
-//! A story is on the publication stack iff it doesn't have any
-//! appearance at all.
+//! Events should be documented in the doc blurb for the
+//! @expr{LogFormat@} configuration variable.
 {
-  int story_id = story->id();
+  // Currently this bypasses logger modules. Might change in the future.
 
-  if(!edition) {
-    ASSERT_IF_DEBUG (pgv);
-    edition = pgv->edition();
+  if( !log_function )
+    return; // No file is open for logging.
+
+  if(do_not_log_patterns &&
+     Roxen._match("0.0.0.0", do_not_log_patterns))
+    return;
+
+  sscanf (facility, "%[^#]", string modname);
+
+  if (string format =
+      log_format[facility + "/" + action] ||
+      log_format[facility + "/*"] ||
+      // Also try without the module copy number if the facility
+      // appears to be a module identifier.
+      modname != "" && (log_format[modname + "/" + action] ||
+                        log_format[modname + "/*"]) ||
+      log_format["*/*"])
+    roxen.run_log_event_format (format, log_function,
+                                facility, action, resource || "-", info);
+}
+
+array(string) userinfo(string u, RequestID|void id)
+//! @note
+//!   DEPRECATED COMPATIBILITY FUNCTION
+//!
+//! Fetches user information from the authentication module by calling
+//! its userinfo() method. Returns zero if no auth module was present.
+//!
+//! Note that you should always supply id if it's possible, some user
+//! databases require it (such as the htaccess database)
+{
+  User uid;
+  foreach( user_databases(), UserDB m )
+    if( uid = m->find_user( u ) )
+      return uid->compat_userinfo();
+}
+
+array(string) userlist(RequestID|void id)
+//! @note
+//!   DEPRECATED COMPATIBILITY FUNCTION
+//!
+//! Fetches the full list of valid usernames from the authentication
+//! module by calling its userlist() method. Returns zero if no auth
+//! module was present.
+//!
+//! Note that you should always supply id if it's possible, some user
+//! databases require it (such as the htaccess database)
+{
+  array(string) list = ({});
+  foreach( user_databases(), UserDB m ) {
+    if (!m->list_users) continue;
+    list |= m->list_users(id);
+  }
+  return list;
+}
+
+array(string) user_from_uid(int u, RequestID|void id)
+//! @note
+//!   DEPRECATED COMPATIBILITY FUNCTION
+//!
+//! Return the user data for id u from the authentication module. The
+//! id parameter might be left out if FTP. Returns zero if no auth
+//! module was present.
+//!
+//! Note that you should always supply id if it's possible, some user
+//! databases require it (such as the htaccess database)
+{
+  User uid;
+  foreach( user_databases(), UserDB m )
+    if( uid = m->find_user_from_uid( u,id ) )
+      return uid->compat_userinfo();
+}
+
+UserDB find_user_database( string name )
+//! Given a user database name, returns it if it exists in this
+//! configuration, otherwise returns 0.
+{
+  foreach( user_databases(), UserDB m )
+    if( m->name == name )
+      return m;
+}
+
+AuthModule find_auth_module( string name )
+//! Given a authentication method name, returns it if it exists in
+//! this configuration, otherwise returns 0.
+{
+  foreach( auth_modules(), AuthModule m )
+    if( m->name == name )
+      return m;
+}
+
+User authenticate( RequestID id, UserDB|void database)
+//! Try to authenticate the request with users from the specified user
+//! database. If no @[database] is specified, all datbases in the
+//! current configuration are searched in priority order.
+//!
+//! The return value is the autenticated user.
+//! id->misc->authenticated_user is always set to the return value.
+{
+  User u;
+  if (!zero_type (u = id->misc->authenticated_user))
+    return u;
+  foreach( auth_modules(), AuthModule method )
+    if( u = method->authenticate( id, database ) )
+      return id->misc->authenticated_user = u;
+}
+
+mapping authenticate_throw( RequestID id, string realm,
+                            UserDB|void database)
+//! Returns a reply mapping, similar to @[Roxen.http_rxml_reply] with
+//! friends. If no @[database] is specified, all databases in the
+//! current configuration are searched in priority order.
+{
+  mapping m;
+  foreach( auth_modules(), AuthModule method )
+    if( m  = method->authenticate_throw( id, realm, database ) )
+      return m;
+}
+
+User find_user( string user, RequestID|void id )
+//! Tries to find the specified user in the currently available user
+//! databases. If id is specified, this function defaults to the
+//! database that the currently authenticated user came from, if any.
+//!
+//! The other user databases are processed in priority order
+//!
+//! Note that you should always supply id if it's possible, some user
+//! databases require it (such as the htaccess database)
+{
+  User uid;
+
+  if( id && id->misc->authenticated_user
+      && ( uid = id->misc->authenticated_user->database->find_user(user,id)))
+    return uid;
+
+  foreach( user_databases(), UserDB m )
+    if( uid = m->find_user( user,id ) )
+      return uid;
+}
+
+array(string) list_users(RequestID|void id)
+//! Fetches the full list of valid usernames from the authentication
+//! modules by calling the list-users() methods.
+//!
+//! Note that you should always supply id if it's possible, some user
+//! databases require it (such as the htaccess database)
+{
+  array(string) list = ({});
+  foreach( user_databases(), UserDB m )
+    list |= m->list_users(id);
+  return list;
+}
+
+array(string) list_groups(RequestID|void id)
+//! Fetches the full list of valid groupnames from the authentication
+//! modules by calling the list-users() methods.
+//!
+//! Note that you should always supply id if it's possible, some user
+//! databases require it (such as the htaccess database)
+{
+  array(string) list = ({});
+  foreach( user_databases(), UserDB m )
+    list |= m->list_groups(id);
+  return list;
+}
+
+
+
+Group find_group( string group, RequestID|void id )
+//! Tries to find the specified group in the currently available user
+//! databases. If id is specified, this function defaults to the
+//! database that the currently authenticated user came from, if any.
+//!
+//! The other user databases are processed in priority order
+//!
+//! Note that you should always supply id if it's possible, some user
+//! databases require it (such as the htaccess database)
+{
+  Group uid;
+
+  if( id && id->misc->authenticated_user
+      && ( uid = id->misc->authenticated_user->database->find_group( group ) ))
+    return uid;
+
+  foreach( user_databases(), UserDB m )
+    if( uid = m->find_group( group,id ) )
+      return uid;
+}
+
+
+string last_modified_by(Stdio.File file, RequestID id)
+{
+  Stat s;
+  int uid;
+  array u;
+
+  if(objectp(file)) s=file->stat();
+  if(!s || sizeof(s)<5) return "A. Nonymous";
+  uid=s[5];
+  u=user_from_uid(uid, id);
+  if(u) return u[0];
+  return "A. Nonymous";
+}
+
+
+
+
+// Some clients does _not_ handle the magic 'internal-gopher-...'.
+// So, lets do it here instead.
+private mapping internal_gopher_image(string from)
+{
+  sscanf(from, "%s.gif", from);
+  sscanf(from, "%s.jpg", from);
+  from -= ".";
+  // Disallow "internal-gopher-..", it won't really do much harm, but a list of
+  // all files in '..' might be retrieved (that is, the actual directory
+  // file was sent to the browser)
+  Stdio.File f = lopen("roxen-images/dir/"+from+".gif","r");
+  if (f)
+    return (["file":f, "type":"image/gif", "stat":f->stat(),]);
+  else
+    return 0;
+  // File not found.
+}
+
+#ifdef MODULE_LEVEL_SECURITY
+private mapping(RoxenModule:array) security_level_cache = set_weak_flag (([]), 1);
+
+int|mapping check_security(function|RoxenModule a, RequestID id,
+                           void|int slevel)
+{
+  array seclevels;
+  // NOTE:
+  //   ip_ok and auth_ok are three-state variables.
+  //   Valid contents for them are:
+  //     0  Unknown state -- No such restriction encountered yet.
+  //     1  May be bad -- Restriction encountered, and test failed.
+  //    ~0  OK -- Test passed.
+
+  if (RoxenModule mod = Roxen.get_owning_module (a)) {
+    // Only store the module objects in the cache and not `a' directly
+    // since it can be (in) an object that is very short lived.
+    if (!(seclevels = security_level_cache[mod])) {
+      if(mod->query_seclevels)
+        seclevels = ({
+          mod->query_seclevels(),
+          mod->query("_seclvl"),
+        });
+      else
+        seclevels = ({0,0});
+      security_level_cache[mod] = seclevels;
+    }
   }
   else
-    ASSERT_IF_DEBUG (!pgv || pgv->edition() == edition);
-
-  ASSERT_IF_DEBUG (!is_placed || (is_placed && pgv));
-  ASSERT_IF_DEBUG (!story_doc_id || (story_doc_id && pgv));
-
-  //  We disallow appearances in template editions. In that case we don't
-  //  even bother looking up any existing appearance but exit directly.
-  if (edition->is_template())
-    return 0;
-
-  SqlTools.SqlTable sa_tbl = story_apps_table();
-  int story_app_id = sa_tbl->insert_or_update ((["story_id": story_id,
-                                                 "edition_id": edition->id()]));
-
-  // Remove any appearance from the publication stack.
-  sa_tbl->delete ("story_id = " + story_id + " AND edition_id IS NULL");
-  int publ_stack_affected = sa_tbl->get_db()->master_sql->affected_rows() > 0;
-
-  int|Val.Null pg_id = pgv ? pgv->get ("page_group_id") : Val.null;
-  mapping rec = ([ "story_app_id": story_app_id,
-                   "page_group_id": pg_id ]);
-  REP.CachedTable sa_parts_tbl = story_app_parts_table();
-  array(int) sqlres =
-    sa_parts_tbl->select1 ("sa_part_id",
-                           "story_app_id = " + story_app_id +
-                           " AND page_group_id " +
-                           (pg_id == Val.null ? "IS NULL" : (" = " + pg_id)));
-
-  if (sizeof (sqlres)) {
-    rec["sa_part_id"] = sqlres[0];
-  }
-
-  if (pgv && !zero_type (story_doc_id)) {
-    rec->story_doc_id = story_doc_id;
-  }
-
-  if (pgv && !zero_type(is_placed)) {
-    rec->is_placed = is_placed;
-  }
-
-  int sa_part_id = story_app_parts_table()->cached_insert_or_update (rec);
-
-  story->invalidate_appearances();
-  if (publ_stack_affected)
-    story->publication()->invalidate_story_appearances();
-  edition->invalidate_story_appearances();
-  if (pgv) pgv->invalidate_appearances(1);
-  REP.get_print_module()->notify_story_apps_changed (story,
-                                                     publ_stack_affected &&
-                                                     story->publication());
-  REP.get_print_module()->notify_story_apps_changed (story, edition);
-
-  return sa_part_id;
-}
-
-REP.Story modify_story_app(int sa_part_id,
-                           REP.PGVersion|REP.Edition|int(0..0) dst,
-                           void|int is_placed,
-                           void|REP.Story story)
-//! Modifies a story appearance.
-//!
-//! @param sa_part_id
-//! The story_app_parts.sa_part_id identifier of the appearance
-//! record.
-//!
-//! @param dst
-//! The new destination of the appearance.
-//!
-//! If @[dst] is a @[REP.PGVersion] then it specifies the page group
-//! for the appearance, otherwise the appearance is set to the stack.
-//!
-//! If @[dst] is a @[REP.Edition], it sets the appearance to the stack
-//! of that edition.
-//!
-//! If @[dst] is zero, the appearance is set to the stack without
-//! changing the current edition.
-//!
-//! @param is_placed
-//! Updates the is_placed flag in the appearance if it isn't
-//! @[UNDEFINED].
-//!
-//! @param story
-//! The story of the appearance. This is optional and may be given to
-//! save a database query.
-//!
-//! @returns
-//! Returns the story object for the appearance, i.e. @[story] if it
-//! was given.
-{
-  ASSERT_IF_DEBUG(sa_part_id);
-
-  if (!story)
-    story = story_by_id (story_apps_table()->select1 (
-                           "story_id",
-                           "story_app_parts.sa_part_id = " + sa_part_id,
-                           "JOIN story_app_parts USING (story_app_id)")[0]);
-  else
-    ASSERT_IF_DEBUG (story->story_app_parts()[sa_part_id]);
-
-  REP.PGVersion old_pgv = story->appearance_pg (sa_part_id);
-  REP.Edition old_ed = story->appearance_ed (sa_part_id);
-  REP.PGVersion pgv;
-  REP.Edition ed;
-
-  Sql.Sql db = REP.get_db();
-
-  mapping(string:mixed) sap_fields = (["sa_part_id": sa_part_id]);
-
-  if (dst && dst->is_rep_pgv) {
-    pgv = dst;
-    ed = pgv->edition();
-    sap_fields->page_group_id = pgv->get_unver ("page_group_id");
-  } else {
-    ed = dst;
-    sap_fields->page_group_id = Val.null;
-  }
-
-  if (!zero_type (is_placed))
-    sap_fields->is_placed = is_placed;
-
-  int dont_update;
-
-  if (sap_fields->page_group_id) {
-    string where = "t2.sa_part_id = :sa_part_id "
-      "AND story_app_parts.page_group_id = :page_group_id "
-      "AND story_app_parts.story_app_id = t2.story_app_id";
-
-    mapping(string:mixed) bindings =
-      ([ "sa_part_id": sap_fields->sa_part_id,
-         "page_group_id": sap_fields->page_group_id ]);
-
-    array(mapping(string:mixed)) res =
-      story_app_parts_table()->cached_select (({ where, bindings }),
-                                              ", story_app_parts AS t2");
-
-    if (sizeof (res)) // There is already an appearance with this
-                      // story_app_id/page_group_id
-                      // combination. Ignore the update and preserve
-                      // the existing one. The appearance we tried to
-                      // update will be kept as-is.
-      dont_update = 1;
-  }
-
-  if (!dont_update)
-    story_app_parts_table()->cached_update (sap_fields);
-
-  if (ed) {
-    db->query("UPDATE story_apps, story_app_parts "
-              "   SET story_apps.edition_id=%d "
-              " WHERE story_apps.story_app_id = story_app_parts.story_app_id "
-              "   AND story_app_parts.sa_part_id = %d",
-              ed->id(), sa_part_id);
-    ed->invalidate_story_appearances();
-  }
-
-  story->invalidate_appearances();
-  old_ed->invalidate_story_appearances();
-
-  if (old_pgv != pgv) {
-    if (old_pgv) old_pgv->invalidate_appearances(1);
-    if (pgv) pgv->invalidate_appearances(1);
-  }
-
-  REP.get_print_module()->notify_story_apps_changed (story, old_pgv || ed);
-
-  return story;
-}
-
-mapping(string:mixed) get_story_app_fields (int sa_part_id,
-                                            void|REP.OnError on_rec_not_found)
-//! Returns all fields for the edition specific story appearance with
-//! the given id. Don't be destructive on the returned mapping.
-{
-  return story_app_parts_table()->cached_get (sa_part_id, on_rec_not_found);
-}
-
-void set_story_app_fields (mapping(string:mixed) fields)
-//! Changes fields for an edition specific story appearance. Fields
-//! not mentioned in @[fields] are kept. A property field can be
-//! removed by specifying @[Val.null] as value.
-//!
-//! @[fields]->story_slot may be a @[REP.PGVersion.StorySlot] object.
-//!
-//! The appearance to change is specified in one of these ways:
-//!
-//! @ul
-//! @item
-//!   An integer @[fields]->sa_part_id. An entry @[fields]->story is
-//!   optional but saves a db query.
-//! @item
-//!   Two entries @[fields]->story and @[fields]->pgv containing a
-//!   @[REP.Story] and a @[REP.PGVersion] object, respectively. This
-//!   changes an appearance on a page.
-//! @item
-//!   Two entries @[fields]->story and @[fields]->edition containing
-//!   a @[REP.Story] and a @[REP.Edition] object, respectively. This
-//!   changes an appearance on the edition stack.
-//! @endul
-//!
-//! Destructively changes @[fields] to contain sa_part_id and the
-//! values that actually are set in the record.
-//!
-//! This function can not be used to modify the story, page group, or
-//! edition associations - use @[modify_story_app] for that.
-{
-  ASSERT_IF_DEBUG (fields->sa_part_id ||
-                   (fields->story && (fields->pgv || fields->edition))
-                   /*fields=%O*/, fields);
-  ASSERT_IF_DEBUG (zero_type (fields->story_app_id));
-  ASSERT_IF_DEBUG (zero_type (fields->page_group_id));
-  ASSERT_IF_DEBUG (!fields->text_chain_uuids ||
-                   multisetp (fields->text_chain_uuids));
-
-#if 0
-  if (!zero_type (fields->story_slot)) {
-    if (!fields->story_slot)
-      fields->story_slot = Val.null;
-    else if (objectp (fields->story_slot)) {
-      ASSERT_IF_DEBUG (!fields->story_slot || !fields->pgv ||
-                       fields->story_slot->pgv == fields->pgv
-                       /*fields=%O*/, fields);
-      fields->story_slot = fields->story_slot->get_slot_id();
-    }
-  }
-#endif
-
-  REP.Story story = m_delete (fields, "story");
-
-  REP.CachedTable sap_tbl = story_app_parts_table();
-  TableLock lock;
-  REP.PGVersion pgv;
-  REP.Edition edition;
-
-  if (fields->sa_part_id) {
-    if (sizeof (fields - sap_tbl->col_types -
-                (["story": "", "pgv": "", "edition": ""])))
-      // Must lock the table to guarantee atomicity in sap_tbl->update if
-      // a property is changed.
-      lock = TableLock ((["story_apps": READ_LOCK,
-                          "story_app_parts": WRITE_LOCK]));
-  }
-
-  else {
-    pgv = m_delete (fields, "pgv");
-    edition = (pgv && pgv->edition()) ||
-      m_delete (fields, "edition");
-
-    lock = TableLock ((["story_apps": READ_LOCK,
-                        "story_app_parts": WRITE_LOCK]));
-
-    array(mapping(string:mixed)) recs;
-    if (pgv)
-      recs = sap_tbl->cached_select (
-        "story_id=" + story->id() + " AND "
-        "edition_id=" + edition->id() + " AND "
-        "page_group_id=" + pgv->get ("page_group_id"),
-        "JOIN story_apps USING (story_app_id)");
-    else
-      recs = sap_tbl->cached_select (
-        "story_id=" + story->id() + " AND "
-        "edition_id=" + edition->id() + " AND "
-        "page_group_id IS NULL",
-        "JOIN story_apps USING (story_app_id)");
-    if (!sizeof (recs)) return;
-    fields->sa_part_id = recs[0]->sa_part_id;
-  }
-
-  mapping(string:mixed) changed_fields = ([]);
-
-check_changes: {
-    mapping(string:mixed) old_fields = sap_tbl->cached_get (fields->sa_part_id);
-    foreach (fields; string name; mixed val) {
-      mixed old_val = old_fields[name];
-      if (zero_type (old_val) ? val != Val.null : !equal (val, old_val))
-        changed_fields[name] = val;
-    }
-    if (!sizeof (changed_fields)) {
-      if (lock) destruct (lock);
-      return;		 // No changes. Skip update and notifications.
-    }
-  }
-
-  sap_tbl->cached_update (fields);
-
-  if (!story || (changed_fields->story_doc_id && !pgv)) {
-    array(REP.Story|REP.PGVersion) res =
-      get_story_and_pgv_by_sa_part_id (fields->sa_part_id);
-    story = story || res[0];
-    pgv = pgv || res[1];
-  }
-
-  if (lock) destruct (lock);
-
-  // Only need to invalidate page group appearance caches if the
-  // story_doc_id changed.
-  if (changed_fields->story_doc_id && pgv)
-    pgv->invalidate_appearances(story && 1);
-
-  if (story) {
-    story->invalidate_appearances();
-    REP.get_print_module()->notify_story_apps_changed(story);
-  }
-}
-
-array(REP.Story|REP.PGVersion)
-get_story_and_pgv_by_sa_part_id (int sa_part_id)
-{
-  Sql.Sql db = REP.get_db();
-
-  array(mapping(string:mixed)) res =
-    db->typed_query ("SELECT story_id, page_group_id "
-                     "  FROM story_apps "
-                     "  JOIN story_app_parts "
-                     "    USING (story_app_id) "
-                     " WHERE sa_part_id = :sa_part_id",
-                     ([ "sa_part_id": sa_part_id ]));
-
-  int story_id = sizeof (res) && res[0]->story_id;
-  int pg_id = sizeof (res) && res[0]->page_group_id;
-
-  REP.Story story = story_id && story_by_id (story_id);
-  REP.PGVersion pgv = pg_id && current_pgv_by_pg_id (pg_id);
-
-  return ({ story, pgv });
-}
-
-int get_story_id_by_sa_part_id (int sa_part_id)
-{
-  Sql.Sql db = REP.get_db();
-
-  array(mapping(string:mixed)) res =
-    db->typed_query ("SELECT story_id, page_group_id "
-         "  FROM story_apps "
-         "  JOIN story_app_parts "
-         "    USING (story_app_id) "
-         " WHERE sa_part_id = :sa_part_id",
-         ([ "sa_part_id": sa_part_id ]));
-
-  int story_id = sizeof (res) && res[0]->story_id;
-  return story_id;
-}
-
-string sa_part_id_obj_path (int sa_part_id)
-{
-  array(REP.Story|REP.PGVersion) res =
-    get_story_and_pgv_by_sa_part_id (sa_part_id);
-  return sprintf ("sa_part_id(%d,%s,%s)",
-                  sa_part_id,
-                  (res[0] ? res[0]->obj_path() : "-"),
-                  (res[1] ? res[1]->obj_path() : "-"));
-}
-
-REP.Story remove_story_app(int sa_part_id, void|REP.Story story,
-                           bool|void ignore_no_current_pgv)
-//! Removes a story appearance, moving the story to the publication
-//! stack if there are no appearances left.
-//!
-//! @param sa_part_id
-//! The story_app_parts.sa_part_id identifier of the appearance
-//! record.
-//!
-//! @param story
-//! The story of the appearance. This is optional and may be given to
-//! save a database query.
-//!
-//! @returns
-//! Returns the story object for the appearance, i.e. @[story] if it
-//! was given.
-//!
-//! @seealso
-//! @[remove_story_app_from_pgv]
-{
-  ASSERT_IF_DEBUG(sa_part_id);
-
-  if (!story) {
-    array(int) story_ids =
-      story_apps_table()->select1 ("story_id",
-                                   "story_app_parts.sa_part_id = " + sa_part_id,
-                                   "JOIN story_app_parts USING (story_app_id)");
-
-    if (!sizeof (story_ids)) {
-      werror ("REP.DB.remove_story_app: sa_part_id %d not in DB, already "
-              "removed?\n", sa_part_id);
-      return UNDEFINED;
-    }
-    if (!(story = story_by_id (story_ids[0], REP.LOG_ERROR))) {
-      return UNDEFINED;
-    }
-  }
-
-  mapping(int:mapping(string:mixed)) sa_parts = story->story_app_parts();
-
-  if (!sa_parts[sa_part_id]) {
-    werror ("REP.DB.remove_story_app: sa_part_id %d not in story %O, app "
-            "already removed?\n", sa_part_id, story);
-    return UNDEFINED;
-  }
-
-  int story_app_id = sa_parts[sa_part_id]->story_app_id;
-  int sa_part_count;
-  foreach(sa_parts;; mapping(string:mixed) sa_part) {
-    sa_part_count += (sa_part->story_app_id == story_app_id);
-  }
-  ASSERT_IF_DEBUG (story_app_id);
-
-  REP.Edition edition = story->appearance_ed (sa_part_id);
-  REP.PGVersion pgv = story->appearance_pg (sa_part_id, 0,
-                                            ignore_no_current_pgv);
-
-  story_app_parts_table()->cached_remove (sa_part_id);
-
-  Sql.Sql db = REP.get_db();
-
-  if (pgv)
-    pgv->invalidate_appearances(1);
-
-  if (sa_part_count == 1) {
-    // Had only one appearance in this issue before,
-    // so there are no remaining ones now.
-    // FIXME: Race-condition!
-    db->query("DELETE FROM story_apps "
-              "      WHERE story_app_id = %d",
-              story_app_id);
-
-    array tmp = db->query("  SELECT COUNT(story_app_id) AS remaining "
-                          "    FROM story_apps "
-                          "   WHERE story_id = %d "
-                          "GROUP BY story_id", story->id());
-    int remaining = sizeof(tmp) && (int)(tmp[0]->remaining);
-
-    if (!remaining) {
-      // No appearances left, move to publication stack, indicated by
-      // edition_id == NULL.
-      db->query("INSERT INTO story_apps (story_id, edition_id) "
-                "     VALUES (%d, NULL)", story->id());
-      story->publication()->invalidate_story_appearances();
-    }
-  }
-
-  story->invalidate_appearances();
-  edition->invalidate_story_appearances();
-  REP.get_print_module()->notify_story_apps_changed (story, pgv || edition);
-  return story;
-}
-
-void remove_story_app_from_pgv(REP.Story story,
-                               REP.PGVersion pgv)
-//! Removes the story appearance between @[story] and @[pgv], moving
-//! the story to the publication stack if there are no appearances
-//! left. Does nothing if there is no such appearance.
-{
-  mapping(int:int) sa_parts =
-    map (story->story_app_parts(), predef::`->, "page_group_id");
-  if (int sa_part_id = search (sa_parts, pgv->get ("page_group_id")))
-    remove_story_app (sa_part_id, story);
-}
-
-#if 0
-REP.PGVersion.StorySlot story_slot_by_id (string story_slot_id,
-                                          void|int only_existing,
-                                          void|REP.OnError on_invalid_id)
-{
-  if (sscanf (story_slot_id, "%d:%*s", int pgv_id) == 2) {
-    if (REP.PGVersion pgv = pgv_by_id (pgv_id, on_invalid_id)) {
-      return pgv->story_slot_by_id (story_slot_id, only_existing,
-                                    on_invalid_id);
-    }
-  }
-
-  return REP.raise_err (on_invalid_id, "Invalid story slot identifier %s.\n",
-                        story_slot_id);
-}
-
-REP.PGVersion.StorySlot story_slot_by_sa_part_id (int sa_part_id,
-                                                  void|REP.OnError on_not_found)
-{
-  string slot_id = "";
-  if (mapping(string:mixed) sa_part_rec =
-      story_app_parts_table()->cached_get (sa_part_id))
-    slot_id = sa_part_rec->story_slot;
-  return story_slot_by_id (slot_id, 1, on_not_found);
-}
-#endif
-
-protected REP.SIVersion low_make_infant_siv(REP.SIVersion src,
-                                            void|REP.Story story)
-//! Create an infant @[REP.SIVersion] object which can be modified
-//! before it's committed. The object is not inserted into the tables
-//! by this method.
-//!
-//! @param src
-//! The source @[REP.SIVersion], which will be used as a base for the
-//! new object. This may be 0 to indicate that no ancestor should be
-//! set for the object.
-//!
-//! @returns
-//! The newly created object in an uncommitted state.
-{
-  REP.SIVersion infant = story_item_versions_table()->create_infant();
-  infant->parent_version = src || -1;
-
-  if (src) {
-    infant->si_volatile = src->si_volatile;
-    infant->verbatim_copy(src, (["placed_page_group_id": 1, "state": 1]));
-    mapping(string:mixed) fields = ([
-      "date_created" : time(),
-      "story_item_version_uuid" : Standards.UUID.make_version4()->str(),
-      "user_id": REP.get_session()->user_id(),
-    ]);
-    infant->set_fields(fields);
-  } else {
-    // Fix si_volatile for the infant. Cannot (and need not) put it in
-    // the global print_db->si_volatiles until it gets a story_item_id
-    // (handled in SIVersion.low_set_raw_unver).
-    infant->si_volatile = ([]);
-
-    // Ensure set_fields always is called so various fields get their
-    // default values.
-    infant->set_unver_fields (([ "story_id": story->id() ]));
-    infant->set_fields(([]));
-  }
-
-  return infant;
-}
-
-REP.SIVersion create_story_item (REP.Story story,
-                                 REP.ComponentDef def,
-                                 mapping(string:mixed) unver_fields,
-                                 void|mapping(string:mixed) ver_fields,
-                                 void|REP.OnError on_value_error)
-//! Creates a new story item from a component definition, including
-//! the first version of it.
-//!
-//! The story item is not automatically made current. Use
-//! @[make_siv_current] for that.
-//!
-//! @param story
-//! Containing story for the item.
-//!
-//! @param unver_fields
-//! Data for unversioned portions of the story item.
-//!
-//! @param ver_fields
-//! Data for the versioned portions of the story item. This parameter
-//! will be used when initializing the first version of the story
-//! item.
-//!
-//! @returns
-//! The newly created @[REP.SIVersion] object which can be modified
-//! until the caller calls @[REP.DB.make_siv_current] on it.
-{
-  REP.SIVersion siv = low_make_infant_siv(0, story);
-  ASSERT_IF_DEBUG(def->id());
-
-  siv->internal_set_data_fields_initials (def);
-
-  if (!ver_fields) ver_fields = ([]);
-  ver_fields->component_def_id = def->id();
-  if (!siv->set_fields(ver_fields, on_value_error)) {
-    return 0;
-  }
-
-  if (!siv->set_unver_fields(unver_fields, on_value_error)) {
-    return 0;
-  }
-
-  siv = story_item_versions_table()->low_object_create(siv);
-  story->invalidate_story_complete_cache();
-  story->zap_items_cache(false, true);
-  return siv;
-}
-
-REP.SIVersion copy_story_item (REP.SIVersion src, REP.Story dst,
-                               void|int(0..1) prefer_placeholders,
-                               void|mapping(string:int) map_id_output)
-//! Creates a new story item in @[dst], copying all data fields in
-//! @[src]. The copy will normally be added in the Extra area. However,
-//! if copying takes place within the same story, or if the destination
-//! story has an identical area, the new item will be added at
-//! the end of that component area. By setting @[prefer_placeholders] we
-//! will search for placeholders in the destination area and use them
-//! instead.
-//!
-//! The story item is not automatically made current. Use
-//! @[make_siv_current] for that.
-//!
-//! @returns
-//! The newly created @[REP.SIVersion] object which can be modified
-//! until the caller calls @[REP.DB.make_siv_current] on it.
-{
-  REP.SIVersion siv = low_make_infant_siv (0, src->story());
-  ASSERT_IF_DEBUG (src->id());
-
-  siv->internal_set_data_fields_initials (src->component_def());
-
-  mapping(string:mixed) unver_fields =
-    siv->copy_unver_fields & src->get_rec_unver();
-  unver_fields->story = dst;
-
-  //  Is the definition valid in the destination?
-  REP.ComponentAreaDef ca_def = src->component_area_def();
-  if (src->story() == dst) {
-    //  Copy takes place within same story so ca_def exist unless we are
-    //  targeting the Extra area so nothing needs to be done here.
-  } else if (ca_def) {
-    //  See if definitions are compatible
-    REP.StoryTemplateDef dst_tmpl_def = dst->story_tmpl_def();
-    if (has_value (dst_tmpl_def->component_area_defs(), ca_def)) {
-      // The source item's ca_def exists in the destination story's
-      // StoryTemplateDef - let's use it.
-    } else {
-      //  Check if both story templates are derived from same master since
-      //  that ensure compatible areas as well, though we'll have to map
-      //  manually.
-      REP.StoryTemplateDef src_tmpl_def = ca_def->story_tmpl_def();
-      REP.StoryTemplateDef src_root_def =
-        src_tmpl_def->get_parent(REP.RETURN_ZERO) || src_tmpl_def;
-      REP.StoryTemplateDef dst_root_def =
-        dst_tmpl_def->get_parent(REP.RETURN_ZERO) || dst_tmpl_def;
-      if (src_root_def == dst_root_def) {
-        //  Look up with same name
-        string ca_def_name = ca_def->name();
-        ca_def =
-          dst_tmpl_def->comp_area_def_by_name(ca_def_name, REP.RETURN_ZERO);
-      } else {
-        //  Failed to find match
-        ca_def = 0;
-      }
-    }
-  }
-
-  //  New item is normally placed at end of area unless we are instructed
-  //  to scan for placeholders.
-  REP.SIVersion delete_placeholder_siv;
-  if (ca_def) {
-    array(REP.SIVersion) ca_sivs = dst->latest_items_by_area(ca_def);
-    int ca_insert_pos = sizeof(ca_sivs) + 1;
-
-    // If the caller allows reuse of empty/initial items we'll look
-    // for those and reuse the placeholder's order value. The placeholder
-    // itself will be deleted in the end since we will otherwise renumber
-    // the items too early.
-    if (prefer_placeholders) {
-      for (int i = 0; i < sizeof(ca_sivs); i++) {
-        if (ca_sivs[i]->all_fields_empty_or_initial()) {
-          //  Remember position and then delete placeholder
-          delete_placeholder_siv = ca_sivs[i];
-          ca_insert_pos = delete_placeholder_siv->get_unver("comp_area_order");
-          break;
-        }
-      }
-    }
-
-    unver_fields +=
-      ([ "component_area_def_id" : ca_def->id(),
-         "comp_area_order"       : ca_insert_pos ]);
-  } else {
-    unver_fields +=
-      ([ "component_area_def_id": 0,
-         "comp_area_order"      : sizeof (dst->latest_items_by_area (0)) + 1 ]);
-  }
-
-  //  Since the origin field may carry a reference to a feed item or an
-  //  external writer we clear those in the copy. Also reset any imported
-  //  date.
-  unver_fields += ([ "origin": UNDEFINED, "date_imported": UNDEFINED ]);
-
-  siv->set_unver_fields (unver_fields);
-
-  // Note: date_created and user_id are not among the copied fields,
-  // so the current time and user is kept in the copy.
-  siv->set_fields (siv->copy_fields & src->get_rec());
-
-  // Must commit the object before we can set external values in it.
-  siv = story_item_versions_table()->low_object_create (siv);
-  if (map_id_output) {
-    map_id_output["si:" + src->get_unver("story_item_id")] =
-      siv->get_unver("story_item_id");
-  }
-
-  REP.DBObject.DisableAutoCommit dac = siv->DisableAutoCommit();
-  foreach (src->data_fields (1), REP.DataField df) {
-    //  Copy field but clear attribute for deconstruct which is tied to the
-    //  original's placement.
-    REP.DataField df_copy = siv->copy_data_field (df);
-    df_copy->set_attr("deconstruct", UNDEFINED);
-  }
-
-  dst->zap_items_cache(false, true);
-  destruct (dac);
-
-  //  Delete old placeholder if needed and force iten renumbering
-  if (delete_placeholder_siv)
-    delete_placeholder_siv->delete_story_item();
-
-  dst->invalidate_story_complete_cache();
-  return siv;
-}
-
-REP.SIVersion
-create_story_item_from_feed_item (REP.Story story,
-                                  void|REP.SIVersion old_siv,
-                                  NewsFeed.Item item,
-                                  mapping (string:mixed) unver_fields,
-                                  void|mapping(string:mixed) ver_fields,
-                                  void|REP.OnError on_value_error)
-{
-  int date_imported = item->get_date_imported();
-  unver_fields += ([ "date_imported": date_imported ]);
-
-  REP.SIVersion siv;
-  if (old_siv) {
-    //  Place data in existing siv
-    siv = add_siv(old_siv, ver_fields, on_value_error);
-    if (siv)
-      siv->set_unver_fields(unver_fields);
-  } else {
-    //  Create new siv. We'll need to find a suitable component definition
-    //  for the item type, either in the current publication configuration
-    //  or in a global one. We prefer the basic components "ep_text" and
-    //  "ep_image" but they may be unavailable due to overriding, in which
-    //  case we compare compponent classes instead.
-    //
-    //  If the caller already provides a component area definition in the
-    //  unversioned field mapping we take that as best choice.
-    REP.ComponentDef use_comp_def;
-    if (REP.ComponentAreaDef use_ca_def = unver_fields["component_area_def"]) {
-      use_comp_def = use_ca_def->component_def();
-    } else {
-      string type = item->get_type();
-      ASSERT_IF_DEBUG(type == "text" || type == "photo");
-      string want_name  = (type == "text") ? "ep_text"  : "ep_image";
-      string want_class = (type == "text") ? "rep.text" : "rep.image";
-
-      REP.ComponentDef best_comp_def, good_comp_def, ok_comp_def;
-      foreach (component_defs_for_publication(story->publication()),
-               REP.ComponentDef comp_def) {
-        if (comp_def->get_name() == want_name) {
-          //  Exact match so stop here
-          best_comp_def = comp_def;
-          break;
-        } else {
-          //  Check for exact class or class prefix. A direct match is
-          //  preferred to a prefix match. In either case we keep looking
-          //  even if we find something.
-          string cls = comp_def->get_class();
-          if (cls == want_class) {
-            if (!good_comp_def)
-              good_comp_def = comp_def;
-          } else if (has_prefix(cls, want_class + ".")) {
-            if (!ok_comp_def)
-              ok_comp_def = comp_def;
-          }
-        }
-      }
-      use_comp_def = best_comp_def || good_comp_def || ok_comp_def;
-      if (!use_comp_def)
-        return REP.raise_err(on_value_error,
-                             "Could not find suitable component definition "
-                             "for feed item of type %s (component class %s).\n",
-                             type, want_class);
-    }
-
-    siv = create_story_item (story, use_comp_def, unver_fields,
-                             ver_fields, on_value_error);
-  }
-  if (!siv)
-    return REP.raise_err(on_value_error, "Could not add new item.\n");
-
-  //  Make a copy since we'll operate destructively on values below
-  mapping(string:mixed) md = item->get_metadata() + ([ ]);
-
-  //  Peek at item fields to see if any values should be grabbed from a
-  //  rich-text body style.
-  string body_richtext = item->get_richtext();
-  mapping(string:array(Parser.XML.Tree.Node)) grabbed_nodes = ([ ]);
-  if (body_richtext) {
-    //  Build node tree before we lose styles in the conversion step
-    Parser.XML.Tree.Node root =
-      Parser.XML.Tree.parse_input("<root>" + body_richtext + "</root>");
-    foreach (siv->data_fields (1), REP.DataField field) {
-      REP.FieldDef fd = field->field_def();
-      if (array(string) from_style_globs = fd->get_initial_from_body_style()) {
-        //  This field wants one or more body text paragraphs. We'll scan
-        //  through the body and move any nodes from the flow into the
-        //  special list.
-        array(Parser.XML.Tree.Node) grab_nodes = ({ });
-        root->walk_preorder(lambda(Parser.XML.Tree.Node n) {
-                              if (n->get_tag_name() == "div") {
-                                if (string cls = n->get_attributes()["class"]) {
-                                  if (!has_prefix(cls, "p_"))
-                                    return;
-                                  cls = lower_case(cls[2..]);
-                                  foreach (from_style_globs, string glb)
-                                    if (glob(glb, cls)) {
-                                      //  Grab this node
-                                      grab_nodes += ({ n });
-                                      break;
-                                    }
-                                }
-                              }
-                            });
-        if (sizeof(grab_nodes)) {
-          //  Unlink from body structure
-          foreach (grab_nodes, Parser.XML.Tree.Node n)
-            n->get_parent()->remove_child(n);
-
-          string fname = field->name();
-          if (grabbed_nodes[fname])
-            grabbed_nodes[fname] += grab_nodes;
-          else
-            grabbed_nodes[fname] = grab_nodes;
-        }
-      }
-    }
-
-    //  If we've mutated the body tree we need to stringify the body again
-    //  for the conversion below.
-    if (sizeof(grabbed_nodes))
-      body_richtext = root[0]->get_children()->html_of_node() * "";
-
-    root->zap_tree();
-  }
-
-  siv->set_unver_fields (([ "origin" : (REP.Types.feed_origin_type +
-                                        item->get_handle()) ]));
-
-  //  Populate item fields in definition order to get some
-  //  predictability across multiple stories. The exception is image
-  //  fields, which we want to process first to make sure any iptciim
-  //  data provider has something to work with for related text
-  //  fields.
-  //
-  //  NOTE: Updating a field that acts as a data provider for other fields
-  //  will trigger an async update of its consumers through internal
-  //  callbacks (e.g. FieldDef::data_field_changed()). Those updates will
-  //  race against our own initialization below.
-  multiset(string) source_used = (< >);
-  array(REP.DataField) data_fields = siv->data_fields();
-
-  array(REP.DataField) image_fields =
-    filter (data_fields,
-            lambda (REP.DataField df)
-            {
-              return df->field_def()->get ("type") == "image";
-            });
-  array(string) image_field_names = image_fields->name();
-
-  data_fields = image_fields + (data_fields - image_fields);
-  array(string) image_cts = REP.LDE.field_to_mime_type["image"];
-
-  multiset(string) data_field_names = (multiset) data_fields->name();
-  foreach (data_fields, REP.DataField field) {
-    mixed value;
-    string source_field;
-
-    switch (field->name()) {
-    case "headline":
-    case "rubrik":
-    case "tittel":
-      value = item->get_title();
-      source_field = "title";
-      break;
-
-    case "filename":
-      value = basename(item->get_raw_filepath() || item->get_md_filepath());
-      source_field = "filepath";
-      break;
-
-    case "blurb":
-    case "subheadline":
-    case "ingress":
-      //  Prefer subtitle but caption will do unless a real caption field
-      //  is present in the definition.
-      value = item->get_sub_title();
-      source_field = "subtitle";
-      if (value && value != "") break;
-      if (!data_field_names["caption"] &&
-          !data_field_names["bildtext"] &&
-          !data_field_names["bildetext"]) {
-        value = m_delete(md, "caption-abstract");
-        source_field = "caption";
-      }
-      break;
-
-    case "body":
-    case "bodytext":
-    case "brodtext":
-    case "brodtekst":
-      //  Attempt rich-text if item provides it and field type matches
-      if (body_richtext) {
-        REP.FieldDef fd = field->field_def();
-        if (fd->get_type() == "rich-text") {
-          string html =
-            REP.LDE.convert_value_to_type(body_richtext, "rich-text", fd);
-          field->set_data(html);
-          source_used["text"] = 1;
-          continue;
-        }
-      }
-
-      //  Fallback to plaintext
-      value = item->get_text();
-      source_field = "text";
-      break;
-
-    case "byline":
-      //  Prefer byline to credit, but both will do
-      value = m_delete(md, "by-line");
-      source_field = "md:by-line";
-      if (value && value != "") break;
-      value = m_delete(md, "credit");
-      source_field = "md:credit";
-      break;
-
-    case "notes":
-      value = item->get_notes();
-      source_field = "notes";
-      break;
-
-    case "credit":
-      //  Prefer credit to byline, but both will do
-      value = m_delete(md, "credit");
-      source_field = "md:credit";
-      if (value && value != "") break;
-      value = m_delete(md, "by-line");
-      source_field = "md:by-line";
-      break;
-
-    case "caption":
-    case "bildtext":
-    case "bildetext":
-      //  NB: See "blurb" etc above for another mapping of caption with
-      //  lower priority.
-      value = m_delete(md, "caption-abstract");
-      source_field = "caption";
-      break;
-
-    default:
-      //  We primarily want a feed image to go into the earmarked fields
-      //  listed in the case statements below. However, if none of those
-      //  are present we should pick the first image-capable field available.
-      if (!has_value(image_fields, field) ||
-          sizeof(image_field_names & ({ "image", "bild", "bilde" }) ))
-        break;
-      //  NOTE: Fallthrough
-    case "image":
-    case "bild":
-    case "bilde":
-      //  Only accept files of supported image types
-      string ct = item->get_raw_mimetype();
-      if (has_value(image_cts, ct) && !source_used["raw"]) {
-        Stdio.Stream src_fd = item->get_raw_file_stream();
-        field->set_in_file (src_fd, UNDEFINED, ct);
-        field->set_attr ("orig_filename", item->get_basename());
-        source_used["raw"] = 1;
-      }
-      continue;
-    }
-
-    if (value == "") {
-      value = UNDEFINED;
-    }
-
-    if (!value) {
-      source_used[source_field] = 1;
-
-      // Attempt to get content from the data provider (if any) instead.
-      if (REP.DataProvider.Provider prov = field->get_data_provider()) {
-        if (prov->name == "feed-import" ||
-            prov->name == "feed-import-xml" ||
-            prov->name == "iptciim") {
-          //  No point in checking is_empty_or_initial() directly after
-          //  update call since data provider execution is asynchronous.
-          //  We've already given priority to feed item data so we skip
-          //  to next field directly.
-          field->update_from_data_provider();
-          continue;
-        }
-      }
-    }
-
-    //  If a rich-text value was extracted from the body field we'll let
-    //  that take precedence of whatever we prepared above.
-    if (array(Parser.XML.Tree.Node) body_nodes = grabbed_nodes[field->name()]) {
-      string xml = body_nodes->html_of_node() * "";
-      value = REP.LDE.convert_value_to_type(xml, "rich-text",
-                                            field->field_def());
-      field->set_data(value);
-
-      //  No need to track that these grabbed nodes (which were already
-      //  unlinked from the feed body) have been used since their grabbing
-      //  was already based on the fact that they would be used.
-    } else if (value) {
-      if (arrayp (value))
-        value = value * " ";
-
-      //  Normalize to field definition (e.g. converting newlines). We give
-      //  the old data the type "plain-text-multiline" which is our best
-      //  guess for text-based fields at the moment.
-      value = REP.LDE.convert_value_to_type(value, "plain-text-multiline",
-                                            field->field_def());
-
-      field->set_data (value);
-      source_used[source_field] = 1;
-    }
-  }
-
-  //  Any feed data that hasn't been used at this point should be added
-  //  as extra fields so the data isn't lost.
-  mapping(string:string) source_remaining =
-    ([ "title"               : item->get_title(),
-       "subtitle"            : item->get_sub_title(),
-       "text"                : body_richtext || item->get_text(),
-       "caption"             : md["caption-abstract"],
-       "notes"               : item->get_notes(),
-       //"raw"               : 0,
-       "md:by-line"          : md["by-line"],
-       "md:by-line-title"    : md["by-line-title"],
-       "md:credit"           : md["credit"],
-       "md:source"           : md["source"],
-       "md:city"             : md["city"],
-       "md:datetime"         : ( ({ stringp(md["date"]) && md["date"],
-                                    stringp(md["time"]) && md["time"] }) -
-                                 ({ 0 }) ) * ", "
-    ]) - source_used;
-  foreach (source_remaining; string key; string|array val) {
-    //  Some items (e.g. caption-abstract) seem to be arrays at times so
-    //  we convert them to plain strings.
-    if (arrayp(val)) {
-      val = val * " ";
-      source_remaining[key] = val;
-    }
-
-    if (!stringp(val) || val == "")
-      m_delete(source_remaining, key);
-  }
-
-  //  Combine several metadata fields into one
-  array(string) md_misc_fields =
-    ({ "md:by-line", "md:by-line-title", "md:credit", "md:source",
-       "md:city", "md:datetime" });
-  array(string) md_misc = map(md_misc_fields, source_remaining) - ({ 0 });
-  source_remaining -= md_misc_fields;
-
-  void add_extra_field(string prompt, string type, string data) {
-    //  An orphaned field must have a corresponding field definition, and
-    //  that in turn needs a parent component definition. We'll add these
-    //  on-demand and reference them from the data field in the siv even
-    //  though the siv's own component definition won't see them.
-    mapping label = ([ "en" : prompt ]);
-    if (REP.DataField orphan_field = siv->add_orphan_field(label, type)) {
-      orphan_field->set_data (data);
-    }
-  };
-
-  foreach (source_remaining; string field; string val) {
-    string field_type = "plain-text";
-    if (field == "text" && body_richtext) {
-      field_type = "rich-text";
-    } else if (sizeof(val / "\n") > 1) {
-      field_type = "plain-text-multiline";
-    }
-    add_extra_field("Feed: " + String.capitalize(field), field_type, val);
-  }
-  if (sizeof(md_misc)) {
-    add_extra_field("Feed: Metadata", "plain-text-multiline", md_misc * "\n");
-  }
-
-  return siv;
-}
-
-REP.SIVersion add_siv (REP.SIVersion old_siv,
-                       void|mapping(string:mixed) changed_fields,
-                       void|REP.OnError on_value_error)
-//! Adds a new @[REP.SIVersion] to the history axis of a story item.
-//!
-//! The new story item version is not automatically made current. Use
-//! @[make_siv_current] for that. @[set_in_current_siv] is often more
-//! convenient.
-//!
-//! @param old_siv
-//! The old @[REP.SIVersion] object that precedes the one which is created.
-//!
-//! @param changed_fields
-//! Changes that are made to the set of data fields in the
-//! @[REP.SIVersion] object. Only versioned fields may be set this
-//! way.
-//!
-//! @returns
-//! The newly created @[REP.SIVersion] object if successful.
-{
-  ASSERT_IF_DEBUG(old_siv);
-  REP.SIVersion infant = low_make_infant_siv(old_siv);
-  if (changed_fields && !infant->set_fields(changed_fields, on_value_error))
-    return 0;
-
-  REP.Story story = old_siv->story();
-  REP.SIVersion new_siv = story_item_versions_table()->low_object_create(infant);
-  story->zap_items_cache(false, true);
-  return new_siv;
-}
-
-REP.SIVersion add_latest_siv (REP.SIVersion current_siv,
-                              string siv_lock,
-                              void|mapping(string:mixed) changed_fields,
-                              void|REP.OnError on_lock_error,
-                              void|REP.OnError on_value_error)
-//! Adds a new latest @[REP.SIVersion] (that is not current) unless
-//! one exists already.
-//!
-//! @param current_siv
-//!   The current @[REP.SIVersion].
-//!
-//! @param siv_lock
-//!   The lock for this story item.
-//!
-//! @param changed_fields
-//!   See @[add_siv].
-//!
-//! @param on_lock_error
-//!   What to do if @[siv_lock] is not a valid lock for this story item.
-//!
-//! @param on_value_error
-//!   See @[add_siv].
-{
-  if (check_siv_lock (current_siv, siv_lock)) {
-    ASSERT_IF_DEBUG (current_siv == current_siv->current_siv());
-    REP.SIVersion latest_siv = current_siv->latest_siv();
-    if (latest_siv == current_siv) {
-      return add_siv (current_siv, changed_fields, on_value_error);
-    } else {
-      if (changed_fields)
-        latest_siv->set_fields (changed_fields);
-      return latest_siv;
-    }
-  }
-
-  return REP.raise_err (on_lock_error,
-                        "%O not locked with key %O\n",
-                        current_siv,
-                        siv_lock);
-}
-
-protected int(0..1)
-unlocked_make_siv_current(REP.SIVersion new_siv,
-                          void|REP.SIVersion old_siv,
-                          void|REP.OnError on_stale_siv)
-//! Sets a new @[REP.SIVersion] as the current one for a given story
-//! item id, under the assumption that all tables involved have been
-//! locked by the caller.
-{
-  ASSERT_IF_DEBUG (new_siv->get ("story_item_id"));
-  ASSERT_IF_DEBUG (new_siv->get ("story_item_version_uuid"));
-
-  ASSERT_IF_DEBUG(!old_siv || (old_siv->get("story_item_id") ==
-                               new_siv->get("story_item_id")));
-  ASSERT_IF_DEBUG(old_siv != new_siv);
-  ASSERT_IF_DEBUG(!old_siv || old_siv->id() /* %O */ < new_siv->id() /* %O */,
-                  old_siv, new_siv);
-
-  REP.SIVersion cur_siv = new_siv->current_siv();
-  if (!zero_type (old_siv) && old_siv != cur_siv)
-    return REP.raise_err (on_stale_siv,
-                          "Cannot make stale story item version "
-                          "%O current (latest is %O but expected %O)\n",
-                          new_siv, cur_siv, old_siv);
-
-  if (cur_siv && new_siv->id() <= cur_siv->id())
+    seclevels = ({0,0});
+
+  if(slevel && (seclevels[1] > slevel)) // "Trustlevel" to low.
+    // Regarding memory cache: This won't have any impact, since it's
+    // always the same, regardless of the client requesting the file.
     return 1;
 
-  story_items_table()->
-    cached_update((["story_item_id" : new_siv->get("story_item_id"),
-                    "cur_siversion_id" : new_siv->id()]));
+  mixed err;
+  if( function(RequestID:int|mapping) f = seclevels[0] )
+    // And here we don't have to take notice of the RAM-cache either,
+    // since the security patterns themselves does that.
+    //
+    // All patterns that varies depending on the client must use
+    // NOCACHE(), to force the request to be uncached.
+    //
+    err=catch { return f( id ); };
+  else
+    return 0; // Ok if there are no patterns.
 
-  // Insta-garb handled in SIVersion.ver_record_hook.
-
-  story_item_versions_table()->
-    schedule_record_notification ("new_version", new_siv, cur_siv);
-
-  new_siv->parent_version = 0;
-
-  new_siv->story()->zap_items_cache(true, true);
+  report_error("check_security(): %s:\n%s\n",
+               LOC_M(39, "Error during module security check"),
+               describe_backtrace(err));
 
   return 1;
 }
+#endif
+// Empty all the caches above.
+void invalidate_cache()
+{
+  last_module_cache = 0;
+  filter_module_cache = 0;
+  userdb_module_cache = 0;
+  auth_module_cache = 0;
+  first_module_cache = 0;
+  url_module_cache = 0;
+  location_module_cache = 0;
+  logger_module_cache = 0;
+  file_extension_module_cache = ([]);
+  provider_module_cache = ([]);
+#ifdef MODULE_LEVEL_SECURITY
+  security_level_cache = set_weak_flag (([ ]), 1);
+#endif
+}
 
-int(0..1) make_siv_current(REP.SIVersion new_siv,
-                           void|REP.SIVersion old_siv,
-                           void|REP.OnError on_stale_siv)
-//! Sets the @[new_siv] as the current version for the story item.
+// Empty all the caches above AND the ones in the loaded modules.
+void clear_memory_caches()
+{
+  invalidate_cache();
+  foreach(indices(otomod), RoxenModule m)
+    if (m && m->clear_memory_caches)
+      if (mixed err = catch( m->clear_memory_caches() ))
+        report_error("clear_memory_caches() "+
+                     LOC_M(40, "failed for module %O:\n%s\n"),
+                     otomod[m], describe_backtrace(err));
+}
+
+//  Returns tuple < image, mime-type >
+protected array(string) draw_saturation_bar(int hue,int brightness, int where,
+                                            int small_version)
+{
+  Image.Image bar =
+    small_version ? Image.Image(16, 128) : Image.Image(30, 256);
+
+  hue &= 0xff;
+  brightness &= 0xff;
+
+  for(int i=0;i<128;i++)
+  {
+    int j = i * 2;
+    array color = hsv_to_rgb(hue, 255 - j, brightness);
+    if (small_version) {
+      bar->line(0, i, 15, i, @color);
+    } else {
+      bar->line(0, j, 29, j, @color);
+      bar->line(0, j + 1,29, j + 1, @color);
+    }
+  }
+
+  if (where >= 0 && where <= 255) {
+    where = 255 - where;
+    int hilite = (brightness > 128) ? 0 : 255;
+    if (small_version)
+      bar->line(0, where / 2, 15, where / 2, hilite, hilite, hilite);
+    else
+      bar->line(0, where, 29, where, hilite, hilite, hilite);
+  }
+
+#if constant(Image.JPEG) && constant(Image.JPEG.encode)
+  return ({ Image.JPEG.encode(bar), "image/jpeg" });
+#else
+  return ({ Image.PNG.encode(bar), "image/png" });
+#endif
+}
+
+
+#if constant(Image.GIF) && constant(Image.PNG)
+array(mapping) spinner_data = 0;
+
+//  Returns tuple < image, mime type >
+protected array(string) draw_spinner(string bgcolor)
+{
+  //  Parse color
+  array color = parse_color(bgcolor);
+
+  //  Load all spinner PNGs
+  if (!spinner_data) {
+    array(mapping) temp_spinner_data = ({ });
+    for (int i = 0; i < 12; i++) {
+      string src = lopen("roxen-images/spinner" + i + ".png", "r")->read();
+      temp_spinner_data += ({ Image.PNG._decode(src) });
+    }
+    spinner_data = temp_spinner_data;
+  }
+
+  //  Create non-transparent Image object for each frame
+  array(Image.Image) frames = ({ });
+  foreach(spinner_data, mapping data) {
+    Image.Image frame = Image.Image(17, 17, @color);
+    frame->paste_mask(data->image, data->alpha);
+    frames += ({ frame });
+  }
+
+  //  Create animated GIF using colortable based on first frame (all of
+  //  them have the same set of colors)
+  Image.Colortable colors = Image.Colortable(frames[0]);
+  string res = Image.GIF.header_block(17, 17, colors);
+  foreach(frames, Image.Image frame)
+    res += Image.GIF.render_block(frame, colors, 0, 0, 0, 1);
+  res +=
+    Image.GIF.netscape_loop_block(0) +
+    Image.GIF.end_block();
+
+  return ({ res, "image/gif" });
+}
+#endif
+
+
+// Inspired by the internal-gopher-... thingie, this is the images
+// from the administration interface. :-)
+private mapping internal_roxen_image( string from, RequestID id )
+{
+  sscanf(from, "%s.gif", from);
+  sscanf(from, "%s.jpg", from);
+  sscanf(from, "%s.xcf", from);
+  sscanf(from, "%s.png", from);
+
+#if constant(Image.GIF) && constant(Image.PNG)
+  //  Animated spinner image
+  if (has_prefix(from, "spinner-")) {
+    array(string) spinner = draw_spinner(from[8..]);
+    return ([ "data" : spinner[0],
+              "type" : spinner[1],
+              "stat" : ({ 0, 0, 0, 900000000, 0, 0, 0 }) ]);
+  }
+#endif
+
+  // Automatically generated colorbar. Used by wizard code...
+  int hue,bright,w;
+  string colorbar;
+  if(sscanf(from, "%s:%d,%d,%d", colorbar, hue, bright,w)==4) {
+    array bar = draw_saturation_bar(hue, bright, w,
+                                    colorbar == "colorbar-small");
+    return Roxen.http_string_answer(bar[0], bar[1]);
+  }
+
+  Stdio.File f;
+
+  if( !id->misc->internal_get )
+    if(f = lopen("roxen-images/"+from+".png", "r"))
+      return (["file":f, "type":"image/png", "stat":f->stat()]);
+
+  if(f = lopen("roxen-images/"+from+".gif", "r"))
+    return (["file":f, "type":"image/gif", "stat":f->stat()]);
+
+  if(f = lopen("roxen-images/"+from+".jpg", "r"))
+    return (["file":f, "type":"image/jpeg", "stat":f->stat()]);
+
+  if(f = lopen("roxen-images/"+from+".xcf", "r"))
+    return (["file":f, "type":"image/x-gimp-image", "stat":f->stat()]);
+
+  if(f = lopen("roxen-images/"+from+".gif", "r"))
+    return (["file":f, "type":"image/gif", "stat":f->stat()]);
+  // File not found.
+  return 0;
+}
+
+
+mapping (mixed:function|int) locks = ([]);
+
+#ifdef THREADS
+// import Thread;
+
+mapping locked = ([]), thread_safe = ([]);
+
+mixed _lock(object|function f)
+{
+  Thread.MutexKey key;
+  function|int l;
+  TIMER_START(module_lock);
+  if (functionp(f)) {
+    f = function_object(f);
+  }
+  if (l = locks[f])
+  {
+    if (l != -1)
+    {
+      // Allow recursive locks.
+      catch{
+        // report_debug("lock %O\n", f);
+        locked[f]++;
+        key = l();
+      };
+    } else
+      thread_safe[f]++;
+  } else if (f->thread_safe) {
+    locks[f]=-1;
+    thread_safe[f]++;
+  } else {
+    if (!locks[f])
+    {
+      // Needed to avoid race-condition.
+      l = Thread.Mutex()->lock;
+      if (!locks[f]) {
+        locks[f]=l;
+      }
+    }
+    // report_debug("lock %O\n", f);
+    locked[f]++;
+    key = l();
+  }
+  TIMER_END(module_lock);
+  return key;
+}
+
+#define LOCK(X) key=_lock(X)
+#define UNLOCK() do{key=0;}while(0)
+#else
+#define LOCK(X)
+#define UNLOCK()
+#endif
+
+string examine_return_mapping(mapping m)
+{
+   string res;
+
+   if (m->extra_heads)
+      m->extra_heads=mkmapping(Array.map(indices(m->extra_heads),
+                                         lower_case),
+                               values(m->extra_heads));
+   else
+      m->extra_heads=([]);
+
+   switch (m->error||200)
+   {
+      case 302: // redirect
+         if (m->extra_heads &&
+             (m->extra_heads->location))
+           res = sprintf("Returned redirect to %O ", m->extra_heads->location);
+         else
+           res = "Returned redirect, but no location header. ";
+         break;
+
+      case 401:
+         if (m->extra_heads["www-authenticate"])
+           res = sprintf("Returned authentication failed: %O ",
+                         m->extra_heads["www-authenticate"]);
+         else
+           res = "Returned authentication failed. ";
+         break;
+
+      case 200:
+         // NB: Note the setting of extra_heads above.
+         if (sizeof(m) <= 1) {
+           res = "Returned multi status. ";
+           break;
+         }
+         res = "Returned ok. ";
+         break;
+
+      default:
+         res = sprintf("Returned %O. ", m->error);
+   }
+
+   if (!zero_type(m->len))
+      if (m->len<0)
+         res += "No data ";
+      else
+         res += sprintf("%O bytes ", m->len);
+   else if (stringp(m->data))
+     res += sprintf("%d bytes ", strlen(m->data));
+   else if (objectp(m->file))
+      if (catch {
+         Stat a=m->file->stat();
+         res += sprintf("%O bytes ", a[1]-m->file->tell());
+      })
+        res += "? bytes ";
+
+   if (m->data) res += "(static)";
+   else if (m->file) res += "(open file)";
+   else if (m->upgrade_websocket) res += "(upgrade to websocket)";
+
+   if (stringp(m->extra_heads["content-type"]) ||
+       stringp(m->type)) {
+      res += sprintf(" of %O", m->type||m->extra_heads["content-type"]);
+   }
+
+   return res;
+}
+
+//! Find all applicable locks for this user on @[path].
+mapping(string:DAVLock) find_locks(string path, int(-1..1) recursive,
+                                   int(0..1) exclude_shared, RequestID id)
+{
+  SIMPLE_TRACE_ENTER(0, "find_locks(%O, %O, %O, X)",
+                     path, recursive, exclude_shared);
+  mapping(string:DAVLock) locks = ([]);
+
+  foreach(location_module_cache||location_modules(),
+          [string loc, function func])
+  {
+    SIMPLE_TRACE_ENTER(function_object(func),
+                       "Finding locks in %O.", loc);
+    string subpath;
+    if (has_prefix(path, loc)) {
+      // path == loc + subpath.
+      subpath = path[sizeof(loc)..];
+    } else if (recursive && has_prefix(loc, path)) {
+      // loc == path + ignored.
+      subpath = "/";
+    } else {
+      // Does not apply to this location module.
+      TRACE_LEAVE("Skip this module.");
+      continue;
+    }
+    TRACE_ENTER(sprintf("subpath: %O", subpath),
+                function_object(func)->find_locks);
+    mapping(string:DAVLock) sub_locks =
+      function_object(func)->find_locks(subpath, recursive,
+                                        exclude_shared, id);
+    TRACE_LEAVE("");
+    if (sub_locks) {
+      SIMPLE_TRACE_LEAVE("Got some locks: %O", sub_locks);
+      locks |= sub_locks;
+    } else {
+      TRACE_LEAVE("Got no locks.");
+    }
+  }
+  SIMPLE_TRACE_LEAVE("Returning %O", locks);
+  return locks;
+}
+
+//! Check that all locks that apply to @[path] for the user the request
+//! is authenticated as have been mentioned in the if-header.
 //!
-//! @param new_siv
-//! The new @[REP.SIVersion] that should become the current one.
+//! WARNING: This function has some design issues and will very likely
+//! get a different interface. Compatibility is NOT guaranteed.
 //!
-//! @param old_siv
-//! The expected current story item version, which may be zero if
-//! @[new_siv] is the first version. Pass @[UNDEFINED] to not check
-//! the current siv at all (which introduces a race unless the
-//! story_item_versions table is locked for the duration).
+//! @param path
+//!   Normalized path below the filesystem location.
 //!
-//! @param on_stale_siv
-//! Determines how the method will behave in the case where @[old_siv]
-//! doesn't match the current story item version.
+//! @param recursive
+//!   If @expr{1@} also check recursively under @[path] for locks.
 //!
 //! @returns
-//! 1 on success.
+//!   Returns one of
+//!   @mixed
+//!     @type int(0..0)
+//!       Zero if not locked, or all locks were mentioned.
+//!     @type mapping(zero:zero)
+//!       An empty mapping if @[recursive] was true and there
+//!       were unmentioned locks on paths with @[path] as a prefix.
+//!       The missing locks are registered in the multistatus for
+//!       the @[id] object.
+//!     @type mapping(string:mixed)
+//!       A @[Protocols.HTTP.DAV_LOCKED] error status in all other cases.
+//!   @endmixed
 //!
 //! @note
-//! If @[old_siv] isn't checked, and @[new_siv] already is current or
-//! old, then nothing happens and 1 is returned.
+//! @[DAVLock] objects may be created if the filesystem has some
+//! persistent storage of them. The default implementation does not
+//! store locks persistently.
+mapping(string:mixed)|int(-1..0) check_locks(string path,
+                                             int(0..1) recursive,
+                                             RequestID id)
 {
-  TableLock lock = TableLock((["story_items": WRITE_LOCK,
-                               "story_item_versions": WRITE_LOCK,
-                               "stories": READ_LOCK]));
+  TRACE_ENTER(sprintf("check_locks(%O, %d, X)", path, recursive), this);
 
-  int ok = unlocked_make_siv_current(new_siv, old_siv, on_stale_siv);
-  destruct(lock);
-  return ok;
-}
-
-REP.SIVersion siv_by_id (int(1..) story_item_version_id,
-                         void|REP.OnError on_rec_not_found)
-{
-  return story_item_versions_table()->object_get (story_item_version_id,
-                                                  on_rec_not_found);
-}
-
-REP.SIVersion siv_by_uuid(string story_item_version_uuid,
-                          void|REP.OnError on_rec_not_found)
-{
-  REP.ObjectTable tbl = story_item_versions_table();
-  REP.SIVersion siv = siv_by_id (rec_id_by_uuid (tbl, story_item_version_uuid),
-                                 REP.RETURN_ZERO);
-
-  if (siv)
-    return siv;
-
-  return REP.raise_err(on_rec_not_found,
-                       "Story item version with uuid %s not found.\n",
-                       story_item_version_uuid);
-}
-
-REP.SIVersion current_siv_by_si_id(int story_item_id,
-                                   void|REP.OnError on_rec_not_found)
-//! Returns the current story item version, i.e. the latest
-//! @[REP.SIVersion] that has been made current by
-//! @[make_siv_current].
-//!
-//! @param story_item_id
-//! The story item id.
-//!
-//! @returns
-//! The current @[REP.SIVersion] object for the given story item id or
-//! 0 if no current object is found.
-{
-  mapping(string:mixed) si =
-    story_items_table()->cached_get(story_item_id, on_rec_not_found);
-  if (!si)
+  mapping(string:DAVLock) locks = find_locks(path, recursive, 0, id);
+  // Common case.
+  if (!sizeof(locks)) {
+    TRACE_LEAVE ("Got no locks.");
     return 0;
-
-  int|Val.Null last_siv_id = si->cur_siversion_id;
-
-  return !zero_type (last_siv_id) &&
-    story_item_versions_table()->object_get(last_siv_id, on_rec_not_found);
-}
-
-REP.SIVersion current_siv_by_si_uuid (string story_item_uuid,
-                                      void|REP.OnError on_rec_not_found)
-//! Like @[current_siv_by_si_id], but takes a story item uuid as
-//! argument instead.
-{
-  return current_siv_by_si_id (rec_id_by_uuid (story_items_table(),
-                                               story_item_uuid),
-                               on_rec_not_found);
-}
-
-REP.SIVersion latest_siv_by_si_id (int story_item_id,
-                                   void|REP.OnError on_rec_not_found)
-//! Returns the latest story item version, which might be later than
-//! the one returned by @[current_siv_by_si_id] if there is one that
-//! hasn't yet been made current.
-{
-  array(REP.SIVersion) items = sivs_by_si_id (story_item_id, 1);
-
-  if (!sizeof (items))
-    return REP.raise_err (on_rec_not_found, "story_item_id %d not found.\n",
-                          story_item_id);
-
-  return items[0];
-}
-
-//! Returns an array of SIVersion objects for the given StoryItem id.
-//!
-//! @seealso
-//!   @[sivs_by_si_uuid()]
-array(REP.SIVersion) sivs_by_si_id(int si_id,
-                                   void|int(1..) limit,
-                                   void|int include_deleted)
-{
-  REP.SIVersion siv = current_siv_by_si_id (si_id, REP.RETURN_ZERO);
-
-  if (!siv) {
-    // No current pgv for the specified story item. We'll fetch one
-    // from the DB (this is a pretty rare case).
-    REP.ObjectTable siv_tbl = story_item_versions_table();
-    array(REP.SIVersion) sivs =
-      siv_tbl->object_select ("story_item_id = " + si_id,
-                              0,
-                              "LIMIT 1");
-    if (sizeof (sivs))
-      siv = sivs[0];
-    else
-      return ({});
   }
 
-  return siv->all_versions (limit, include_deleted);
-}
-
-//! Returns an array of SIVersion objects for the given StoryItem uuid.
-//!
-//! @seealso
-//!   @[sivs_by_si_id()]
-array(REP.SIVersion) sivs_by_si_uuid(string si_uuid,
-                                   void|int(1..) limit,
-                                   void|int include_deleted) {
-  REP.CachedTable si_tbl = story_items_table();
-  array(mapping) res = si_tbl->cached_select("story_item_uuid = '" +
-                                             si_tbl->quote(si_uuid) + "'");
-  if (!sizeof(res)) return ({});
-  return sivs_by_si_id(res[0]->story_item_id, limit, include_deleted);
-}
-
-array(REP.SIVersion) current_sivs_by_origin (REP.Types.OriginType type,
-                                             string origin,
-                                             void|int include_deleted)
-{
-  REP.ObjectTable si_version_tbl = story_item_versions_table();
-  REP.CachedTable si_tbl = story_items_table();
-  return si_version_tbl
-    ->object_get_multi (si_tbl
-                        ->select1 ("cur_siversion_id",
-                                   sprintf("`origin` = '%s'" +
-                                           (include_deleted ?
-                                            "" :
-                                            " AND delete_at = 0"),
-                                           si_tbl->quote (type + origin))));
-
-}
-
-// Note: No need for this to be persistent, since we embed
-//       the time of the lock operation in the key, and
-//       restarting Roxen typically takes more than one second.
-protected int lock_counter;
-
-//! Returns an array of currently locked @[REP.SIVersion] for a
-//! specified user, if any, otherwise the empty array.
-array(REP.SIVersion) locked_sivs_by_user (string user)
-{
-  REP.ObjectTable si_version_tbl = story_item_versions_table();
-  REP.CachedTable si_tbl = story_items_table();
-  return si_version_tbl
-    ->object_get_multi (si_tbl
-                        ->select1 ("cur_siversion_id",
-                                   sprintf("`lock` LIKE '%s'",
-                                           si_tbl->quote (user) + ":%")));
-}
-
-void unlock_all_sivs_for_user (string user)
-{
-  foreach (locked_sivs_by_user (user), REP.SIVersion siv) {
-    if (string key = get_siv_lock (siv)) {
-      unlock_siv (siv, key);
+  mapping(string:array(array(array(string)))) if_data = id->get_if_data();
+  if (if_data) {
+    foreach(if_data[0], array(array(string)) tokens) {
+      m_delete(locks, tokens[0][1]);
     }
-  }
-}
 
-string user_from_siv_lock(string key)
-{
-  //  Key is formatted as "user:timestamp:counter"
-  return key && (key / ":")[0];
-}
-
-protected string generate_lock_key (string locker)
-{
-  return sprintf("%s:%d:%d", locker, time(1), lock_counter++);
-}
-
-//! Attempt to lock a SIVersion.
-//!
-//! @param siv
-//!   The @[REP.SIVersion] to lock.
-//!
-//! @param locker
-//!   A string identifying the locker, typically a username. Iff zero,
-//!   the locker will be resolved from the RequestID of the current
-//!   session.
-//!
-//! @returns
-//!   Returns the siv lock on success, and @expr{0@} (zero) on failure.
-string try_lock_siv(REP.SIVersion siv, void|string locker)
-{
-  if (!locker) {
-    locker = REP.get_session()->user_handle();
-    if (!locker) {
-      error ("No locker string provided and no user handle for this "
-             "session.\n");
+    if (!sizeof(locks)) {
+      TRACE_LEAVE ("All locks unlocked.");
+      return 0;
     }
   }
 
-  string key = generate_lock_key (locker);
-  return story_items_table()->
-    cached_test_and_update(siv->get("story_item_id"), "lock", key, Val.null) &&
-    key;
-}
-
-//! Attempt to re-lock an already locked SIVersion.
-//!
-//! @param siv
-//!   The @[REP.SIVersion] to lock.
-//!
-//! @param current_key
-//!   What the caller thinks is the current key. If this doesn't match
-//!   the actual current key, the relock will fail.
-//!
-//! @param locker
-//!   A string identifying the locker, typically a username. Iff zero,
-//!   the locker will be resolved from the RequestID of the current
-//!   session.
-//!
-//! @returns
-//!   Returns the siv lock on success, and @expr{0@} (zero) on failure.
-string relock_siv (REP.SIVersion siv, string current_key, void|string locker)
-{
-  if (!locker) {
-    locker = REP.get_session()->user_handle();
-    if (!locker) {
-      error ("No locker string provided and no user handle for this "
-             "session.\n");
+  // path = id->not_query;
+  if (!has_suffix(path, "/")) path += "/";
+  mapping(string:mixed) ret =
+    Roxen.http_dav_error(Protocols.HTTP.DAV_LOCKED, "lock-token-submitted");
+  foreach(locks;;DAVLock lock) {
+    TRACE_ENTER(sprintf("Checking lock %O against %O.", lock, path), 0);
+    // NB: We can't perform a string comparison here, as we don't
+    //     know whether the path is case-sensitive or not. But as
+    //     we know that all lock paths are on the path to or through
+    //     `path`, a comparison of the string lengths is sufficient.
+    if (sizeof(lock->path) <= sizeof(path)) {
+      TRACE_LEAVE("Direct lock.");
+      TRACE_LEAVE("Locked.");
+      return ret;
     }
-  }
-
-  string new_key = generate_lock_key (locker);
-  return story_items_table()->
-    cached_test_and_update(siv->get("story_item_id"), "lock",
-                           new_key, current_key) && new_key;
-}
-
-//! Get the current lock from a SIVersion (if any).
-//!
-//! @returns
-//!   Returns the siv lock if the SIVersion is locked,
-//!   and @expr{0@} (zero) if it isn't locked.
-string get_siv_lock(REP.SIVersion siv)
-{
-  string|Val.Null res = siv->get_unver("lock");
-  return !objectp(res) && res;
-}
-
-//! Check if the @[key] is valid for the SIVersion.
-//!
-//! @returns
-//!   Returns @expr{1@} if the key is valid and @expr{0@} (zero) on failure.
-int(0..1) check_siv_lock(REP.SIVersion siv, string key)
-{
-  return siv->get_unver("lock") == key;
-}
-
-//! Check if @[siv] is locked by the user @[user].
-//!
-//! @param user
-//!   The user handle to check against. Iff zero, the user handle will
-//!   be resolved from the RequestID of the current session.
-int(0..1) check_siv_lock_user (REP.SIVersion siv, void|string user)
-{
-  if (!user) {
-    user = REP.get_session()->user_handle();
-    if (!user) {
-      error ("No locker string provided and no user handle for this "
-             "session.\n");
+    if (lock->is_file) {
+      id->set_status_for_path(lock->path[..<1], ret);
+    } else {
+      id->set_status_for_path(lock->path, ret);
     }
+    TRACE_LEAVE("Added to multi status.");
   }
-
-  return user_from_siv_lock (get_siv_lock (siv)) == user;
+  TRACE_LEAVE("Multi status.");
+  return ([]);
 }
 
-//! Unlock a SIVersion given a key.
-//!
-//! @returns
-//!   Returns @expr{1@} on success and @expr{0@} (zero) on failure.
-int unlock_siv(REP.SIVersion siv, string key)
-{
-  return story_items_table()->
-    cached_test_and_update(siv->get("story_item_id"), "lock", Val.null, key);
-}
+protected multiset(DAVLock) active_locks = (<>);
 
-//! Forcefully unlock a SIVersion without knowing the key.
+//! Unlock the lock represented by @[lock] on @[path].
 //!
 //! @returns
-//!   Returns name of last user holding the lock on success and
-//!   @expr{0@} (zero) if the item wasn't locked or if unlocking failed.
-string|void force_unlock_siv(REP.SIVersion siv)
+//!   Returns a result-mapping on error, and @expr{0@} (zero) on success.
+mapping(string:mixed) unlock_file(string path, DAVLock lock, RequestID id)
 {
-  if (string key = get_siv_lock(siv))
-    if (unlock_siv(siv, key))
-      return user_from_siv_lock(key);
+  // Canonicalize path.
+  if (!has_suffix(path, "/")) path+="/";
+
+  foreach(location_module_cache||location_modules(),
+          [string loc, function func])
+  {
+    if (has_prefix(path, loc)) {
+      // path == loc + subpath.
+      mapping(string:mixed) ret =
+        function_object(func)->unlock_file(path[sizeof(loc)..], lock, id);
+
+      // FIXME: Semantics for partial unlocking?
+      if (ret) return ret;
+    } else if (lock->recursive && has_prefix(loc, path)) {
+      // loc == path + ignored.
+      mapping(string:mixed) ret =
+        function_object(func)->unlock_file("/", lock, id);
+
+      // FIXME: Semantics for partial unlocking?
+      if (ret) return ret;
+    }
+    if (function_object(func)->webdav_opaque) break;
+  }
+  active_locks[lock] = 0;
+  // destruct(lock);
   return 0;
 }
 
-//! Switch component area definition for an SIVersion.
-//! Takes care of component definition conversion, if needed.
+//! Force expiration of any locks that have timed out.
+int expire_locks(RequestID id)
+{
+  int t = time(1);
+  int min_time = 0x7fffffff;
+  foreach(active_locks; DAVLock lock;) {
+    if (lock->expiry_time) {
+      if (lock->expiry_time < t) {
+        unlock_file(lock->path, lock, id);
+      } else if (lock->expiry_time < min_time) {
+        min_time = lock->expiry_time;
+      }
+    }
+  }
+  return min_time - t;
+}
+
+mixed expire_lock_loop_handle;
+
+protected void expire_lock_loop()
+{
+  int t = expire_locks(0);	// NOTE: Called with RequestID 0!
+
+  if (sizeof(active_locks)) {
+    t = max (t, 1); // Wait at least one second before the next run.
+    t = min (t, 3600); // Expire locks at least once every hour.
+
+    if (expire_lock_loop_handle)
+      remove_call_out (expire_lock_loop_handle);
+
+    expire_lock_loop_handle = roxen.background_run(t, expire_lock_loop);
+  }
+}
+
+//! Refresh a lock.
 //!
-//! @param siv
-//!   The SIVersion to switch area definition for.
+//! Update the expiry time for the lock.
+void refresh_lock(DAVLock lock)
+{
+  if (lock->expiry_delta) {
+    // Use time() instead of time(1) to avoid expiring the lock too
+    // early if the returned time is old. Probably unlikely, but
+    // anyways.
+    lock->expiry_time = lock->expiry_delta + time();
+  }
+}
+
+//! Attempt to lock @[path].
 //!
-//! @param ca_def
-//!   The component area definition to switch to.
+//! @param path
+//!   Path to lock.
 //!
-//! @param position
-//!   The new position within the component area.
+//! @param locktype
+//!   Type of lock (currently only @expr{"DAV:write"@} is defined).
+//!
+//! @param lockscope
+//!   Scope of lock either @expr{"DAV:exclusive"@} or
+//!   @expr{"DAV:shared"@}.
+//!
+//! @param expiry_delta
+//!   Idle time in seconds before the lock expires. @expr{0@} (zero)
+//!   means no expiry.
 //!
 //! @returns
-//!   The new SIVersion if we needed to perform component definition
-//!   conversion or 0 if no conversion was needed.
-REP.SIVersion set_siv_component_area_def (REP.SIVersion siv,
-                                          REP.ComponentAreaDef ca_def,
-                                          void|int position)
+//!   Returns a result mapping on failure,
+//!   and the resulting @[DAVLock] on success.
+mapping(string:mixed)|DAVLock lock_file(string path,
+                                        int(0..1) recursive,
+                                        string lockscope,
+                                        string locktype,
+                                        int(0..) expiry_delta,
+                                        array(Parser.XML.Tree.Node) owner,
+                                        RequestID id)
 {
-  mapping(string:mixed) rec =
-    ([ "component_area_def_id" : ca_def && ca_def->id() ]);
+  TRACE_ENTER(sprintf("%O(%O, %O, %O, %O, %O, %O, %O)",
+                      this_function, path, recursive, lockscope,
+                      locktype, expiry_delta, owner, id), 0);
 
-  if (position)
-    rec->comp_area_order = position;
-  else
-    rec->comp_area_order =
-      sizeof (siv->story()->latest_items_by_area (ca_def)) + 1;
+  int is_file;
 
+  // Canonicalize path.
+  if (!has_suffix(path, "/")) {
+    path+="/";
+    is_file = 1;
+  }
 
-  if (ca_def) {
-    REP.ComponentDef ca_comp_def = ca_def->component_def();
-    REP.ComponentDef ca_parent_def = ca_comp_def->get_parent() || ca_comp_def;
-    REP.ComponentDef siv_comp_def = siv->component_def();
-    REP.ComponentDef siv_parent_def =
-      siv_comp_def->get_parent() || siv_comp_def;
+  // FIXME: Race conditions!
 
-    if (ca_comp_def != siv_comp_def &&
-        !ca_comp_def->is_current()) {
-      if (siv_parent_def == ca_parent_def) {
-        if (siv_comp_def->is_current()) {
-          ca_comp_def = siv_comp_def;
-        } else if (array(REP.ComponentDef) derived_defs =
-                   ca_parent_def->derived_defs()) {
-          foreach (derived_defs, REP.ComponentDef def) {
-            // Attempt to find a current def with the same name as the
-            // older one used by our siv.
-            if (def->get_name() == siv_comp_def->get_name())
-              ca_comp_def = def;
+  int fail;
+
+  // First check if there's already some lock on the path that prevents
+  // us from locking it.
+  mapping(string:DAVLock) locks = find_locks(path, recursive, 0, id);
+
+  foreach(locks; string lock_token; DAVLock lock) {
+    TRACE_ENTER(sprintf("Checking lock %O...\n", lock), 0);
+    if ((lock->lockscope == "DAV:exclusive") ||
+        (lockscope == "DAV:exclusive")) {
+      TRACE_LEAVE("Locked.");
+      id->set_status_for_path(lock->path, 423, "Locked");
+      fail = 1;
+    }
+    TRACE_LEAVE("Shared.");
+  }
+
+  if (fail) {
+    TRACE_LEAVE("Fail.");
+    return ([]);
+  }
+
+  // Create the new lock.
+
+  string locktoken = "urn:uuid:" + roxen->new_uuid_string();
+  DAVLock lock = DAVLock(locktoken, path, recursive, lockscope, locktype,
+                         expiry_delta, owner);
+  lock->is_file = is_file;
+  array(array(string|function)) successful_locks = ({});
+  foreach(location_module_cache||location_modules(),
+          [string loc, function func])
+  {
+    string subpath;
+    if (has_prefix(path, loc)) {
+      // path == loc + subpath.
+      subpath = path[sizeof(loc)..];
+    } else if (recursive && has_prefix(loc, path)) {
+      // loc == path + ignored.
+      subpath = "/";
+    } else {
+      // Does not apply to this location module.
+      continue;
+    }
+
+    TRACE_ENTER(sprintf("Calling %O->lock_file(%O, %O, %O)...",
+                        function_object(func), subpath, lock, id), 0);
+    mapping(string:mixed) lock_error =
+      function_object(func)->lock_file(subpath, lock, id);
+    if (lock_error) {
+      // Failure. Unlock the new lock in modules where it was
+      // registered successfully.
+      foreach(reverse(successful_locks), [string loc2, function func2])
+      {
+        if (has_prefix(path, loc2)) {
+          // path == loc2 + subpath.
+          mapping(string:mixed) ret =
+            function_object(func2)->unlock_file(path[sizeof(loc2)..],
+                                                lock, id);
+        } else if (recursive && has_prefix(loc2, path)) {
+          // loc2 == path + ignored.
+          mapping(string:mixed) ret =
+            function_object(func2)->unlock_file("/", lock, id);
+        }
+      }
+      // destruct(lock);
+      TRACE_LEAVE(sprintf("Lock error: %O", lock_error));
+      return lock_error;
+    }
+
+    successful_locks += ({ ({ loc, func }) });
+
+    TRACE_LEAVE("Ok.");
+    if (function_object(func)->webdav_opaque) break;
+  }
+
+  if (expiry_delta) {
+    // Lock with timeout.
+    // FIXME: Race-conditions.
+    if (!sizeof(active_locks)) {
+      // Start the lock expiration loop.
+      active_locks[lock] = 1;
+      expire_lock_loop();
+    } else {
+      active_locks[lock] = 1;
+    }
+  }
+
+  // Success.
+  TRACE_LEAVE("Success.");
+  return lock;
+}
+
+//! Returns the value of the specified property, or an error code
+//! mapping.
+//!
+//! @note
+//!   Returning a string is shorthand for returning an array
+//!   with a single text node.
+//!
+//! @seealso
+//!   @[query_property_set()]
+string|array(Parser.XML.Tree.SimpleNode)|mapping(string:mixed)
+  query_property(string path, string prop_name, RequestID id)
+{
+  foreach(location_module_cache||location_modules(),
+          [string loc, function func])
+  {
+    if (!has_prefix(path, loc)) {
+      // Does not apply to this location module.
+      continue;
+    }
+
+    // path == loc + subpath.
+    string subpath = path[sizeof(loc)..];
+
+    string|array(Parser.XML.Tree.SimpleNode)|mapping(string:mixed) res =
+      function_object(func)->query_property(subpath, prop_name, id);
+    if (mappingp(res) && (res->error == 404)) {
+      // Not found in this module; try the next.
+      continue;
+    }
+    return res;
+  }
+  return Roxen.http_status(Protocols.HTTP.HTTP_NOT_FOUND, "No such property.");
+}
+
+mapping|int(-1..0) low_get_file(RequestID id, int|void no_magic)
+//! The function that actually tries to find the data requested. All
+//! modules except last and filter type modules are mapped, in order,
+//! and the first one that returns a suitable response is used. If
+//! `no_magic' is set to one, the internal magic roxen images and the
+//! @[find_internal()] callbacks will be ignored.
+//!
+//! The return values 0 (no such file) and -1 (the data is a
+//! directory) are only returned when `no_magic' was set to 1;
+//! otherwise a result mapping is always generated.
+{
+#ifdef MODULE_LEVEL_SECURITY
+  int slevel;
+#endif
+
+#ifdef THREADS
+  Thread.MutexKey key;
+#endif
+
+  id->not_query = VFS.normalize_path( id->not_query );
+
+  TRACE_ENTER(sprintf("Request for %s", id->not_query), 0);
+
+  string file=id->not_query;
+  string loc;
+  function funp;
+  mixed tmp, tmp2;
+  mapping|object(Stdio.File)|int fid;
+
+  if(!no_magic)
+  {
+    TIMER_START(internal_magic);
+#ifndef NO_INTERNAL_HACK
+    // Find internal-foo-bar images
+    // min length == 17 (/internal-roxen-?..)
+    // This will save some time indeed.
+    string type;
+    if(sizeof(file) > 17 &&
+#if ROXEN_COMPAT <= 2.1
+       (file[0] == '/') &&
+       sscanf(file, "%*s/internal-%s-%[^/]", type, loc) == 3
+#else
+       sscanf(file, "/internal-%s-%[^/]", type, loc) == 2
+#endif
+       ) {
+      switch(type) {
+       case "roxen":
+        //  Mark all /internal-roxen-* as cacheable even though the user might be
+        //  authenticated (which normally disables protocol-level caching).
+        CACHE_INDEFINITELY();
+        PROTO_CACHE();
+        id->set_response_header("Cache-Control", "public, max-age=31536000");
+
+        TRACE_LEAVE("Magic internal roxen image");
+        if(loc=="unit" || loc=="pixel-of-destiny")
+        {
+          TIMER_END(internal_magic);
+          return (["data":"GIF89a\1\0\1\0\200�\0���\0\0\0!�\4\1\0\0\0\0,"
+                   "\0\0\0\0\1\0\1\0\0\1\1""2\0;",
+                   "type":"image/gif",
+                   "stat": ({0, 0, 0, 900000000, 0, 0, 0})]);
+        }
+        if(has_prefix(loc, "pixel-"))
+        {
+          TIMER_END(internal_magic);
+          return (["data":sprintf("GIF89a\1\0\1\0\200\0\0\0\0\0%c%c%c,\0\0\0"
+                                  "\0\1\0\1\0\0\2\2L\1\0;",
+                                  @parse_color(loc[6..])),
+                   "type":"image/gif",
+                   "stat": ({0, 0, 0, 900000000, 0, 0, 0})]);
+        }
+        TIMER_END(internal_magic);
+        return internal_roxen_image(loc, id);
+
+       case "gopher":
+        TRACE_LEAVE("Magic internal gopher image");
+        TIMER_END(internal_magic);
+        return internal_gopher_image(loc);
+      }
+    }
+#endif
+
+    // Locate internal location resources.
+    if(has_prefix(file, internal_location))
+    {
+      TRACE_ENTER("Magic internal module location", 0);
+      RoxenModule module;
+      string name, rest;
+      function find_internal;
+      if(2==sscanf(file[strlen(internal_location)..], "%s/%s", name, rest) &&
+         (module = find_module(replace(name, "!", "#"))) &&
+         (find_internal = module->find_internal))
+      {
+#ifdef MODULE_LEVEL_SECURITY
+        if(tmp2 = check_security(find_internal, id, slevel))
+          if(intp(tmp2))
+          {
+            TRACE_LEAVE("Permission to access module denied.");
+            find_internal = 0;
+          } else {
+            TRACE_LEAVE("");
+            TRACE_LEAVE("Request denied.");
+            TIMER_END(internal_magic);
+            return tmp2;
           }
-        }
+#endif
+        if(find_internal)
+        {
+          TRACE_ENTER("Calling find_internal()...", find_internal);
+          PROF_ENTER("find_internal","location");
+          LOCK(find_internal);
+          fid=find_internal( rest, id );
+          UNLOCK();
+          //TRACE_LEAVE(sprintf("find_internal has returned %O", fid));
+          TRACE_LEAVE("");
+          PROF_LEAVE("find_internal","location");
+          if(fid)
+          {
+            if(mappingp(fid))
+            {
+              TRACE_LEAVE("");
+              TRACE_LEAVE(examine_return_mapping(fid));
+              TIMER_END(internal_magic);
+              return fid;
+            }
+            else
+            {
+#ifdef MODULE_LEVEL_SECURITY
+              int oslevel = slevel;
+              array slca;
+              if(slca = security_level_cache[ Roxen.get_owning_module (find_internal) ])
+                slevel = slca[1];
+              // security_level_cache from
+              // check_security
+              id->misc->seclevel = slevel;
+#endif
+              if(objectp(fid))
+                TRACE_LEAVE("Returned open filedescriptor. "
+#ifdef MODULE_LEVEL_SECURITY
+                            +(slevel != oslevel?
+                              sprintf(" The security level is now %d.", slevel):"")
+#endif
+                            );
+              else
+                TRACE_LEAVE("Returned directory indicator."
+#ifdef MODULE_LEVEL_SECURITY
+                            +(oslevel != slevel?
+                              sprintf(" The security level is now %d.", slevel):"")
+#endif
+                            );
+            }
+          } else
+            TRACE_LEAVE("");
+        } else
+          TRACE_LEAVE("");
+      } else
+        TRACE_LEAVE("");
+    }
+    TIMER_END(internal_magic);
+  }
+
+  // Well, this just _might_ be somewhat over-optimized, since it is
+  // quite unreadable, but, you cannot win them all..
+  if(!fid)
+  {
+#ifdef URL_MODULES
+  // Map URL-modules
+    TIMER_START(url_modules);
+    foreach(url_module_cache||url_modules(), funp)
+    {
+      PROF_ENTER(Roxen.get_owning_module(funp)->module_name,"url module");
+      LOCK(funp);
+      TRACE_ENTER("URL module", funp);
+      tmp=funp( id, file );
+      UNLOCK();
+      PROF_LEAVE(Roxen.get_owning_module(funp)->module_name,"url module");
+
+      if(mappingp(tmp))
+      {
+        TRACE_LEAVE("");
+        TRACE_LEAVE("Returning data");
+        TIMER_END(url_modules);
+        return tmp;
+      }
+      if(objectp( tmp ))
+      {
+        mixed err;
+
+        id->misc->get_file_nest++;
+        err = catch {
+          if( id->misc->get_file_nest < 20 )
+            tmp = (id->conf || this_object())->low_get_file( tmp, no_magic );
+          else
+          {
+            TRACE_LEAVE("Too deep recursion");
+            error("Too deep recursion in roxen::get_file() while mapping "
+                  +file+".\n");
+          }
+        };
+        id->misc->get_file_nest = 0;
+        if(err) throw(err);
+        TRACE_LEAVE("");
+        TRACE_LEAVE("Returning data");
+        TIMER_END(url_modules);
+        return tmp;
+      }
+      TRACE_LEAVE("");
+      TIMER_END(url_modules);
+    }
+#endif
+
+    TIMER_START(location_modules);
+    foreach(location_module_cache||location_modules(), tmp)
+    {
+      loc = tmp[0];
+      if(has_prefix(file, loc))
+      {
+        TRACE_ENTER(sprintf("Location module [%s] ", loc), tmp[1]);
+#ifdef MODULE_LEVEL_SECURITY
+        if(tmp2 = check_security(tmp[1], id, slevel))
+          if(intp(tmp2))
+          {
+            TRACE_LEAVE("Permission to access module denied.");
+            continue;
+          } else {
+            TRACE_LEAVE("");
+            TRACE_LEAVE("Request denied.");
+            TIMER_END(location_modules);
+            return tmp2;
+          }
+#endif
+        PROF_ENTER(Roxen.get_owning_module(tmp[1])->module_name,"location");
+        TRACE_ENTER("Calling find_file()...", 0);
+        LOCK(tmp[1]);
+        fid=tmp[1]( file[ strlen(loc) .. ] + id->extra_extension, id);
+        UNLOCK();
+        TRACE_LEAVE("");
+        PROF_LEAVE(Roxen.get_owning_module(tmp[1])->module_name,"location");
+        if(fid)
+        {
+          if (id)
+            id->virtfile = loc;
+
+          if(mappingp(fid))
+          {
+            TRACE_LEAVE(""); // Location module [...]
+            TRACE_LEAVE(examine_return_mapping(fid));
+            TIMER_END(location_modules);
+            return fid;
+          }
+          else
+          {
+#ifdef MODULE_LEVEL_SECURITY
+            int oslevel = slevel;
+            array slca;
+            if(slca = security_level_cache[ Roxen.get_owning_module (tmp[1]) ])
+              slevel = slca[1];
+            // security_level_cache from
+            // check_security
+            id->misc->seclevel = slevel;
+#endif
+            if(objectp(fid))
+              TRACE_LEAVE("Returned open filedescriptor."
+#ifdef MODULE_LEVEL_SECURITY
+                          +(slevel != oslevel?
+                            sprintf(" The security level is now %d.", slevel):"")
+#endif
+
+                          );
+            else
+              TRACE_LEAVE("Returned directory indicator."
+#ifdef MODULE_LEVEL_SECURITY
+                          +(oslevel != slevel?
+                            sprintf(" The security level is now %d.", slevel):"")
+#endif
+                          );
+            break;
+          }
+        } else
+          TRACE_LEAVE("");
+      } else if(strlen(loc)-1==strlen(file) && file+"/" == loc) {
+        // This one is here to allow accesses to /local, even if
+        // the mountpoint is /local/. It will slow things down, but...
+
+        TRACE_ENTER("Automatic redirect to location_module.", tmp[1]);
+        TRACE_LEAVE("");
+        TRACE_LEAVE("Returning data");
+
+        // Keep query (if any).
+        // FIXME: Should probably keep config <foo>
+        string new_query = Roxen.http_encode_invalids(id->not_query) + "/" +
+          (id->query?("?"+id->query):"");
+        new_query=Roxen.add_pre_state(new_query, id->prestate);
+
+        TIMER_END(location_modules);
+        return Roxen.http_redirect(new_query, id);
       }
     }
+    TIMER_END(location_modules);
+  }
 
-    if (ca_comp_def != siv_comp_def) {
-      // The component definition will change. We need to add a new
-      // version to accommodate that.
-
-      REP.SIVersion new_siv = REP.DB.add_siv(siv);
-      new_siv->internal_switch_component_definition (ca_comp_def);
-
-      // Make sure we switch atomically.
-      TableLock lock = TableLock((["story_items": WRITE_LOCK,
-                                   "story_item_versions": WRITE_LOCK,
-                                   "stories": READ_LOCK ]));
-
-      new_siv->low_set_raw_unver (rec);
-      unlocked_make_siv_current (new_siv);
-      destruct (lock);
-      return new_siv;
+  if(fid == -1)
+  {
+    if (id->method == Roxen.WEBSOCKET_OPEN_METHOD) {
+      // DWIM.
+      TRACE_LEAVE("Websocket request. Returning 0.");
+      return 0;
+    }
+    if(no_magic)
+    {
+      TRACE_LEAVE("No magic requested. Returning -1.");
+      return -1;
+    }
+    TIMER_START(directory_module);
+    if(dir_module)
+    {
+      PROF_ENTER(dir_module->module_name,"directory");
+      LOCK(dir_module);
+      TRACE_ENTER("Directory module", dir_module);
+      fid = dir_module->parse_directory(id);
+      TRACE_LEAVE("");
+      UNLOCK();
+      PROF_LEAVE(dir_module->module_name,"directory");
+    }
+    else
+    {
+      TRACE_LEAVE("No directory module. Returning 'no such file'");
+      return 0;
+    }
+    TIMER_END(directory_module);
+    if(mappingp(fid))
+    {
+      TRACE_LEAVE("Returning data");
+      return (mapping)fid;
     }
   }
 
-  // No component definition change needed. This is simple, just set
-  // the new ComponentAreaDef and position (if any).
-  siv->low_set_raw_unver (rec);
-
-  return 0;
-}
-
-//! Switch component definition for an SIVersion.
-//! Takes care of component definition conversion.
-//!
-//! @param siv
-//!   The SIVersion to switch component definition for.
-//!
-//! @param comp_def
-//!   The component definition to switch to.
-//!
-//! @returns
-//!   The new SIVersion that was created to accommodate the component
-//!   definition switch.
-REP.SIVersion set_siv_component_def (REP.SIVersion siv,
-                                     REP.ComponentDef comp_def)
-{
-  REP.SIVersion new_siv = REP.DB.add_siv(siv);
-  new_siv->internal_switch_component_definition (comp_def);
-  make_siv_current (new_siv, siv);
-
-  return new_siv;
-}
-
-array(int) add_data_field_placement (REP.DataField df, void|REP.PGVersion pgv)
-//! Adds a data field placement to the placements table. Typically
-//! called by the InDesign module when it detects that a
-//! @[REP.DataField] was placed, either in a @[REP.PGVersion] or
-//! previewed using a library snippet.
-//!
-//! @param df
-//! The @[REP.DataField] that was placed. Note that the version is
-//! significant, i.e. use the field from the correct @[REP.SIVersion]
-//! for a story item.
-//!
-//! @param pgv
-//! The @[REP.PGVersion] that the field was placed in. The version is
-//! significant, and all @[REP.PGVersion]s sharing the same storage counter
-//! will be updated. If this argument isn't provided or zero, it means
-//! that the field was previewed using a library snippet.
-//!
-//! @returns
-//! The data_field_placement_ids that were created/updated.
-{
-  SqlTools.SqlTable dfp_table = data_field_placements_table();
-
-  REP.FieldDef fd = df->field_def();
-  REP.SIVersion cur_siv = df->siv();
-  mapping(REP.SIVersion:mapping(string:mixed)) recs_by_siv =
-    ([ cur_siv : ([ "story_item_version_id" : cur_siv->id(),
-                    "field_def_id"          : fd->id() ]) ]);
-
-  //  If this data field uses external storage shared with a previous SIV
-  //  we need to add a placement flag there as well to avoid later gc
-  //  removal if that SIV is placed permamently in a layout document.
-  if (pgv && !fd->data_sent_inline) {
-    //  NOTE: We're assuming it is the "data" attribute of the given field
-    //        that is placed.
-    if (int old_siv_id = df->get_storage_id(0)) {
-      if (old_siv_id != cur_siv->id()) {
-        if (REP.SIVersion old_siv =
-            REP.DB.siv_by_id(old_siv_id, REP.RETURN_ZERO)) {
-          recs_by_siv[old_siv] = ([ "story_item_version_id" : old_siv_id,
-                                    "field_def_id"          : fd->id() ]);
+  // Map the file extensions, but only if there is a file...
+  TIMER_START(extension_module);
+  if(objectp(fid) &&
+     (tmp = file_extension_modules(loc =
+                                   lower_case(Roxen.extension(id->not_query,
+                                                              id)))))
+  {
+    foreach(tmp, funp)
+    {
+      TRACE_ENTER(sprintf("Extension module [%s] ", loc), funp);
+#ifdef MODULE_LEVEL_SECURITY
+      if(tmp=check_security(funp, id, slevel))
+        if(intp(tmp))
+        {
+          TRACE_LEAVE("Permission to access module denied.");
+          continue;
         }
-      }
-    }
-  }
-
-  array(int(0..0)|REP.PGVersion) loop_pgvs;
-  if (pgv) {
-    loop_pgvs = REP.DB.pgvs_by_storage_counter (pgv->get ("storage_counter"));
-  } else {
-    loop_pgvs = ({ 0 });
-  }
-
-  array(int) dfp_ids = ({});
-  foreach (loop_pgvs, REP.PGVersion pgv) {
-    foreach (recs_by_siv; REP.SIVersion siv; mapping(string:mixed) rec) {
-      mapping(string:mixed) loop_rec = rec + ([]);
-      //  If page_version_id isn't given it will be treated as NULL
-      if (pgv) loop_rec["page_version_id"] = pgv->id();
-
-      dfp_ids += ({ dfp_table->insert_or_update (loop_rec) });
-      siv->update_df_placements_cache_rec (loop_rec);
-    }
-  }
-  return dfp_ids;
-}
-
-void delete_data_field_preview_placement (REP.DataField|REP.SIVersion df_or_siv)
-//! Deletes one or more data field placements. This is only relevant for
-//! library preview placements since flags associated to @[REP.PGVersion]
-//! objects are version-controlled and cannot change retroactively.
-//!
-//! @param df_or_siv
-//! The @[REP.DataField] or @[REP.SIVersion] to delete placements
-//! for. If a @[REP.SIVersion] is provided, all corresponding
-//! @[REP.DataField] placements will be deleted.
-{
-  ASSERT_IF_DEBUG (df_or_siv);
-  ASSERT_IF_DEBUG (df_or_siv->is_rep_siv || df_or_siv->is_rep_data_field);
-
-  SqlTools.SqlTable dfp_table = data_field_placements_table();
-
-  REP.SIVersion siv;
-  REP.DataField df;
-
-  if (df_or_siv->is_rep_data_field) {
-    df = df_or_siv;
-    siv = df->siv();
-  } else {
-    siv = df_or_siv;
-  }
-
-  mapping(string:mixed) conds = ([ "page_version_id" : 0 ]);
-
-  if (siv) conds["story_item_version_id"] = siv->id();
-  if (df) conds["field_def_id"] = df->field_def()->id();
-
-  mapping(string:mixed) bindings = ([]);
-  array(string) where = ({});
-  foreach (conds; string index; mixed value) {
-    //  We need NULL handling for the zero page_version_id value, but only
-    //  here and not in the call to siv->remove_df_placements_cache_rec().
-    bindings[":" + index] = value ? value : Val.null;
-    where += ({ index + " = :" + index });
-  }
-
-  // Just a precaution to avoid zapping the entire table if
-  // something's calling us without arguments...
-  if (!sizeof (where)) return;
-
-  array(int) update_siv_ids;
-  if (!siv) {
-    update_siv_ids = dfp_table->select1 ("DISTINCT story_item_version_id",
-                                         ({ where * " AND ", bindings }));
-  }
-
-  dfp_table->delete (({ where * " AND ", bindings }));
-
-  if (siv) {
-    siv->remove_df_placements_cache_rec (conds);
-  }
-
-  if (update_siv_ids && sizeof (update_siv_ids)) {
-    // Update the RAM state of any instantiated SIVersion objects. The
-    // reason we want to avoid instantiating objects is not only for
-    // performance, but also that instantiation may cause DB lookups
-    // in tables we don't have table locks for.
-    REP.ObjectTable siv_table = story_item_versions_table();
-    foreach (update_siv_ids, int update_siv_id) {
-      if (REP.SIVersion update_siv = siv_table->get_from_cache (update_siv_id))
-        update_siv->remove_df_placements_cache_rec (conds);
-    }
-  }
-}
-
-void copy_data_field_placements (REP.PGVersion src_pgv, REP.PGVersion dst_pgv)
-//! Copies all data field placements from @[src_pgv] to
-//! @[dst_pgv]. Typically used when a @[REP.PGVersion] is copied with
-//! its contents (layout file) intact, and no deconstruct will
-//! occur. Note that copying isn't needed when the layout file of one
-//! @[REP.PGVersion] is copied to the UNPROC_LAYOUT_FILE of another,
-//! since the deconstruct will update placements accordingly.
-{
-  Sql.Sql db = REP.get_db();
-
-  // Using a subquery would be much easier, but with table locks in
-  // place we'd need a second table lock for the subquery, which seems
-  // pretty complicated with the current TableLock implementation...
-  array(mapping(string:mixed)) res =
-    db->typed_query ("SELECT story_item_version_id, field_def_id "
-                     "  FROM data_field_placements " +
-                     " WHERE page_version_id = %d",
-                     src_pgv->id());
-
-  if (sizeof (res)) {
-    int dst_pgv_id = dst_pgv->id();
-    array(int) notify_sivs = ({});
-    db->query ("INSERT IGNORE INTO data_field_placements "
-               " (page_version_id, story_item_version_id, field_def_id) "
-               " VALUES (" +
-               (map (res, lambda (mapping(string:mixed) row)
-                          {
-                            int siv_id = row->story_item_version_id;
-                            notify_sivs += ({ siv_id });
-                            return sprintf ("'%d', '%d', '%d'",
-                                            dst_pgv_id,
-                                            siv_id,
-                                            row->field_def_id);
-                          }) * "),(") +
-               ")");
-    foreach (notify_sivs, int siv_id) {
-      if (REP.SIVersion siv = REP.DB.siv_by_id (siv_id, REP.RETURN_ZERO))
-        siv->update_df_placements_cache();
-    }
-  }
-}
-
-array(REP.DataField) data_field_placements_in_pgv(REP.PGVersion pgv,
-                                                  void|REP.Story story)
-{
-  Sql.Sql db = REP.get_db();
-  array(mapping(string:mixed)) rows =
-    db->typed_query ("SELECT story_item_version_id, field_def_id "
-                     "  FROM data_field_placements " +
-                     " WHERE page_version_id = %d",
-                     pgv->id());
-
-  //  Resolve to SIVs and scope to given story if necessary
-  array(REP.DataField) res = ({ });
-  foreach (rows, mapping(string:mixed) row) {
-    if (REP.SIVersion siv =
-        REP.DB.siv_by_id(row->story_item_version_id, REP.RETURN_ZERO)) {
-      if (!story || (siv->story() == story)) {
-        if (REP.FieldDef fd =
-            REP.DB.field_def_by_id(row->field_def_id, REP.RETURN_ZERO)) {
-          //  Resolve to datafield within this SIV
-          if (REP.DataField df =
-              siv->data_field_by_name(fd->get_name(), REP.RETURN_ZERO))
-            res += ({ df });
+        else
+        {
+          TRACE_LEAVE("");
+          TRACE_LEAVE("Permission denied");
+          TIMER_END(extension_module);
+          return tmp;
         }
-      }
+#endif
+      PROF_ENTER(Roxen.get_owning_module(funp)->module_name,"ext");
+      LOCK(funp);
+      tmp=funp(fid, loc, id);
+      UNLOCK();
+      PROF_LEAVE(Roxen.get_owning_module(funp)->module_name,"ext");
+      if(tmp)
+      {
+        if(!objectp(tmp))
+        {
+          TRACE_LEAVE("");
+          TRACE_LEAVE("Returning data");
+          TIMER_END(extension_module);
+          return tmp;
+        }
+        if(fid && tmp != fid)
+          destruct(fid);
+        TRACE_LEAVE("Returned new open file");
+        fid = tmp;
+        break;
+      } else
+        TRACE_LEAVE("");
     }
   }
+  TIMER_END(extension_module);
+
+  if(objectp(fid))
+  {
+    TIMER_START(content_type_module);
+    if(stringp(id->extension)) {
+      id->not_query += id->extension;
+      loc = lower_case(Roxen.extension(id->not_query, id));
+    }
+    TRACE_ENTER("Content-type mapping module", types_module);
+    tmp=type_from_filename(id->not_query, 1, loc);
+    TRACE_LEAVE(tmp?sprintf("Returned type %O %s.", tmp[0], tmp[1]||"")
+                : "Missing type.");
+    if(tmp)
+    {
+      TRACE_LEAVE("");
+      TIMER_END(content_type_module);
+      return ([ "file":fid, "type":tmp[0], "encoding":tmp[1] ]);
+    }
+    TRACE_LEAVE("");
+    TIMER_END(content_type_module);
+    return ([ "file":fid, ]);
+  }
+
+  if(!fid)
+    TRACE_LEAVE("Returned 'no such file'.");
+  else
+    TRACE_LEAVE("Returning data");
+  return fid;
+}
+
+#define TRY_FIRST_MODULES(FILE, RECURSE_CALL) do {			\
+    TIMER_START(first_modules);						\
+    foreach(first_module_cache||first_modules(), function funp)		\
+    {									\
+      TRACE_ENTER ("First try module", funp);				\
+      if(FILE = funp( id )) {						\
+        TRACE_LEAVE ("Got response");					\
+        break;								\
+      }									\
+      TRACE_LEAVE ("No response");					\
+      if(id->conf != this_object()) {					\
+        TRACE_ENTER (sprintf ("Configuration changed to %O - "		\
+                              "redirecting", id->conf), 0);		\
+        TRACE_LEAVE ("");						\
+        TIMER_END (first_modules);					\
+        TIMER_END (handle_request);					\
+        return id->conf->RECURSE_CALL;					\
+      }									\
+    }									\
+    TIMER_END(first_modules);						\
+  } while (0)
+
+#define TRY_LAST_MODULES(FILE, RECURSE_CALL) do {			\
+    mixed ret;								\
+    TIMER_START(last_modules);						\
+    foreach(last_module_cache||last_modules(), function funp) {		\
+      TRACE_ENTER ("Last try module", funp);				\
+      if(ret = funp(id)) {						\
+        if (ret == 1) {							\
+          TRACE_LEAVE ("Request rewritten - try again");		\
+          TIMER_END(last_modules);					\
+          TIMER_END(handle_request);					\
+          return RECURSE_CALL;						\
+        }								\
+        TRACE_LEAVE ("Got response");					\
+        break;								\
+      }									\
+      TRACE_LEAVE ("No response");					\
+    }									\
+    FILE = ret;								\
+    TIMER_END(last_modules);						\
+  } while (0)
+
+mixed handle_request( RequestID id, void|int recurse_count)
+{
+  mixed file;
+  REQUEST_WERR("handle_request()");
+
+  if (recurse_count > 50) {
+    TRACE_ENTER ("Looped " + recurse_count +
+                 " times in internal redirects - giving up", 0);
+    TRACE_LEAVE ("");
+    return 0;
+  }
+
+  TIMER_START(handle_request);
+  TRY_FIRST_MODULES (file, handle_request (id, recurse_count + 1));
+  if(!mappingp(file) && !mappingp(file = get_file(id)))
+    TRY_LAST_MODULES (file, handle_request(id, recurse_count + 1));
+  TIMER_END(handle_request);
+
+  REQUEST_WERR("handle_request(): Done");
+  MERGE_TIMERS(roxen);
+  return file;
+}
+
+mapping|int get_file(RequestID id, int|void no_magic, int|void internal_get)
+//! Return a result mapping for the id object at hand, mapping all
+//! modules, including the filter modules. This function is mostly a
+//! wrapper for @[low_get_file()].
+{
+  TIMER_START(get_file);
+  int orig_internal_get = id->misc->internal_get;
+  id->misc->internal_get = internal_get;
+  RequestID root_id = id->root_id || id;
+  root_id->misc->_request_depth++;
+  if(sub_req_limit && root_id->misc->_request_depth > sub_req_limit)
+    error("Subrequest limit reached. (Possibly an insertion loop.)");
+
+  mapping|int res;
+  mapping res2;
+  function tmp;
+  res = low_get_file(id, no_magic);
+  TIMER_END(get_file);
+
+  // Note: id may be destructed at this point already (when the
+  // request is handled asynchronously,
+  // i.e. Roxen.http_pipe_in_progress() is returned, but
+  // id->send_result() finishes in another thread before the calling
+  // thread gets to this point.)
+  if (id && (!mappingp (res) || !res->pipe)) {
+    // finally map all filter type modules.
+    // Filter modules are like TYPE_LAST modules, but they get called
+    // for _all_ files.
+    TIMER_START(filter_modules);
+    foreach(filter_module_cache||filter_modules(), tmp)
+    {
+      TRACE_ENTER("Filter module", tmp);
+      PROF_ENTER(Roxen.get_owning_module(tmp)->module_name,"filter");
+      if(res2=tmp(res,id))
+      {
+        if(mappingp(res) && res->file && (res2->file != res->file))
+          destruct(res->file);
+        TRACE_LEAVE("Rewrote result.");
+        res=res2;
+      } else
+        TRACE_LEAVE("");
+      PROF_LEAVE(Roxen.get_owning_module(tmp)->module_name,"filter");
+    }
+    TIMER_END(filter_modules);
+  }
+
+  if (root_id)
+    root_id->misc->_request_depth--;
+
+  if (id)
+    id->misc->internal_get = orig_internal_get;
 
   return res;
 }
 
-// Looking up placements for a SIV: See SIVersion.data_field_placement_pgvs.
-
-
-//
-// Search stuffs here...
-// This mapping should be configurable!
-protected constant story_item_search_field_map = ([
-  "headline" : "headline",
-  "title"    : "title",
-  "body"     : "body",
-  "blurb"    : "blurb",
-]);
-
-string map_field_to_search_field(REP.DataField f) {
-  string f_name = f->name();
-  return story_item_search_field_map[f_name];
+protected string combine_combiners(string s)
+{
+  if (String.width(s) <= 8) return s;
+  return Unicode.normalize(s, "NFC");
 }
 
-// FIXME: This function traverses mappings/arrays and substitutes
-// Val.true, Val.false, Val.null by 1 or 0 to make
-// encode_value_canonic (in SIVersion.commit) able to encode the
-// structure. Do something better<tm>.
-mixed decode_objects (mixed value)
+//! Get a directory listing for the virtual path @[file].
+//!
+//! @param file
+//!   Path in the virtual filesystem.
+//!
+//! @param id
+//!   @[RequestID] for the request.
+//!
+//! @param verbose
+//!   Also list virtual lock files.
+//!
+//! @returns
+//!   Returns an array with all visible files in the specified
+//!   directory if it exists, and @expr{0@} (zero) otherwise.
+//!   Any filesystem encoding of the filenames has been decoded,
+//!   and they have also been Unicode-NFC normalized.
+array(string) find_dir(string file, RequestID id, void|int(0..1) verbose)
 {
-  if (mappingp (value)) {
-    mapping ret = ([]);
-    foreach (value; mixed ind; mixed val) {
-      ret[ind] = decode_objects (val);
-    }
-    return ret;
-  } else if (arrayp (value)) {
-    array ret = ({});
-    foreach (value, mixed val) {
-      ret += ({ decode_objects (val) });
-    }
-    return ret;
-  } else if (objectp (value)) {
-    if (value->is_val_null || value->is_val_false)
+  array dir;
+  TRACE_ENTER(sprintf("List directory %O.", file), 0);
+
+  if(!sizeof (file) || file[0] != '/')
+    file = "/" + file;
+
+#ifdef URL_MODULES
+#ifdef THREADS
+  Thread.MutexKey key;
+#endif
+  // Map URL-modules
+  foreach(url_modules(), function funp)
+  {
+    string of = id->not_query;
+    id->not_query = file;
+    LOCK(funp);
+    TRACE_ENTER("URL module", funp);
+    mixed remap=funp( id, file );
+    UNLOCK();
+
+    if(mappingp( remap ))
+    {
+      id->not_query=of;
+      TRACE_LEAVE("Returned 'No thanks'.");
+      TRACE_LEAVE("");
       return 0;
-    else if (value->is_val_true)
-      return 1;
-    error ("Unrecognized object.\n");
-  } else {
-    return value;
+    }
+    if(objectp( remap ))
+    {
+      mixed err;
+      id->misc->find_dir_nest++;
+
+      TRACE_LEAVE("Recursing");
+      file = id->not_query;
+      err = catch {
+        if( id->misc->find_dir_nest < 20 )
+          dir = (id->conf || this_object())->find_dir( file, id );
+        else
+          error("Too deep recursion in roxen::find_dir() while mapping "
+                +file+".\n");
+      };
+      id->misc->find_dir_nest = 0;
+      TRACE_LEAVE("");
+      if(err)
+        throw(err);
+
+      if (arrayp(dir)) {
+        return map(dir, combine_combiners);
+      }
+      return dir;
+    }
+    TRACE_LEAVE("");
+    id->not_query=of;
   }
+#endif /* URL_MODULES */
+
+  array | mapping d;
+  array(string) locks=({});
+  RoxenModule mod;
+  string loc;
+  foreach(location_modules(), array tmp)
+  {
+    loc = tmp[0];
+    if(!search(file, loc)) {
+      /* file == loc + subpath */
+      TRACE_ENTER(sprintf("Location module [%s] ", loc), tmp[1]);
+#ifdef MODULE_LEVEL_SECURITY
+      if(check_security(tmp[1], id)) {
+        TRACE_LEAVE("Permission denied");
+        continue;
+      }
+#endif
+      mod=function_object(tmp[1]);
+      if(d=mod->find_dir(file[strlen(loc)..], id))
+      {
+        if(mappingp(d))
+        {
+          if(d->files) {
+            TRACE_LEAVE("Got exclusive directory.");
+            TRACE_LEAVE(sprintf("Returning list of %d files.", sizeof(d->files)));
+            return map(d->files, combine_combiners);
+          } else
+            TRACE_LEAVE("");
+        } else {
+          TRACE_LEAVE("Got files.");
+          if(!dir) dir=({ });
+          dir |= d;
+        }
+      }
+      else {
+        if(verbose && mod->list_lock_files)
+          locks |= mod->list_lock_files();
+        TRACE_LEAVE("");
+      }
+    } else if((search(loc, file)==0) && (loc[strlen(file)-1]=='/') &&
+              (loc[0]==loc[-1]) && (loc[-1]=='/') &&
+              (function_object(tmp[1])->stat_file(".", id))) {
+      /* loc == file + "/" + subpath + "/"
+       * and stat_file(".") returns non-zero.
+       */
+      TRACE_ENTER(sprintf("Location module [%s] ", loc), tmp[1]);
+      loc=loc[strlen(file)..];
+      sscanf(loc, "%s/", loc);
+      if (dir) {
+        dir |= ({ loc });
+      } else {
+        dir = ({ loc });
+      }
+      TRACE_LEAVE("Added module mountpoint.");
+    }
+  }
+  if(!dir) {
+    TRACE_LEAVE("No directory contents.\n");
+    return verbose ? ({0})+locks : ([])[0];
+  }
+  if(sizeof(dir))
+  {
+    TRACE_LEAVE(sprintf("Returning list of %d files.", sizeof(dir)));
+    return map(dir, combine_combiners);
+  }
+  TRACE_LEAVE("Returning 'No such directory'.");
+  return 0;
 }
 
+// Stat a virtual file.
 
-typedef function(object:mixed) ExtFieldResolver;
-
-ExtFieldResolver
-get_base_field_resolver(void|mapping(string:array(string)) dbobj_field_hints)
+array(int)|Stat stat_file(string file, RequestID id)
 {
-  return lambda (object obj) {
-           if (dbobj_field_hints && obj->rec_from_get_ext) {
-             mapping(string:int) get_fields;
-             if (string object_type = obj->get_ext ("object_type")) {
-               constant base_fields = ([ "unique_object_id": 1,
-                                         "object_type": 1,
-                                         "id": 1 ]);
+  mixed s, tmp;
+#ifdef THREADS
+  Thread.MutexKey key;
+#endif
+  TRACE_ENTER(sprintf("Stat file %O.", file), 0);
 
-               array(string) obj_hints =
-                 dbobj_field_hints[object_type] || ({});
-               get_fields =
-                 base_fields +
-                 mkmapping (obj_hints, allocate (sizeof (obj_hints), 1));
-             } else {
-               error ("%O didn't return an object_type.\n");
-             }
+  file=replace(file, "//", "/"); // "//" is really "/" here...
 
-             return obj->rec_from_get_ext (get_fields);
-           } else if (obj->get_client_rec) {
-             return obj->get_client_rec();
-           } else if (obj->is_rep_label_wrapper) {
-             return obj->resolve();
-           }
-           error ("Couldn't handle object %O.\n", obj);
-         };
+  if (has_prefix(file, internal_location)) {
+    TRACE_LEAVE("");
+    return 0;
+  }
+
+#ifdef URL_MODULES
+  // Map URL-modules
+  string of = id->not_query;
+  id->not_query = file;
+  foreach(url_module_cache||url_modules(), function funp)
+  {
+    TRACE_ENTER("URL module", funp);
+    LOCK(funp);
+    tmp=funp( id, file );
+    UNLOCK();
+
+    if (tmp) {
+      if(mappingp( tmp )) {
+        id->not_query = of;
+        TRACE_LEAVE("");
+        TRACE_LEAVE("Returned 'No thanks'.");
+        return 0;
+      }
+      if(objectp( tmp ))
+      {
+        mixed err;
+        id->misc->stat_file_nest++;
+        TRACE_LEAVE("Recursing");
+        err = catch {
+            if( id->misc->stat_file_nest < 20 )
+              tmp = (id->conf || this_object())->stat_file(id->not_query, id );
+            else
+              error("Too deep recursion in roxen::stat_file() while mapping "
+                    +file+".\n");
+          };
+        id->not_query = of;
+        id->misc->stat_file_nest = 0;
+        if(err)
+          throw(err);
+        TRACE_LEAVE("");
+        TRACE_LEAVE("Returning data");
+        return tmp;
+      }
+    }
+    TRACE_LEAVE("");
+  }
+  id->not_query = of;
+#endif
+
+  // Map location-modules.
+  foreach(location_module_cache||location_modules(),
+          [string loc, function fun]) {
+    if((file == loc) || ((file+"/")==loc))
+    {
+      TRACE_ENTER(sprintf("Location module [%s] ", loc), fun);
+      TRACE_LEAVE("Exact match.");
+      TRACE_LEAVE("");
+      return Stdio.Stat(({ 0775, -3, 0, 0, 0, 0, 0 }));
+    }
+    if(has_prefix(file, loc))
+    {
+      TRACE_ENTER(sprintf("Location module [%s] ", loc), fun);
+#ifdef MODULE_LEVEL_SECURITY
+      if(check_security(fun, id)) {
+        TRACE_LEAVE("");
+        TRACE_LEAVE("Permission denied");
+        continue;
+      }
+#endif
+      if(s=function_object(fun)->stat_file(file[strlen(loc)..], id))
+      {
+        TRACE_LEAVE("");
+        TRACE_LEAVE("Stat ok.");
+        return s;
+      }
+      TRACE_LEAVE("");
+    }
+  }
+  TRACE_LEAVE("Returned 'no such file'.");
 }
 
-//! Resolver to be used in InDesign context, i.e. when path references
-//! are to be resolved via a file share.
-REP.DB.ExtFieldResolver
-get_id_field_resolver(void|mapping(string:array(string)) dbobj_field_hints)
+mapping error_file( RequestID id )
 {
-  REP.DB.ExtFieldResolver default_resolver =
-    REP.DB.get_base_field_resolver (dbobj_field_hints);
-
-  return lambda (object obj)
-         {
-           if (obj->is_rep_ext_field_ref) {
-             return obj->fileshare_field_path();
-           } else {
-             return default_resolver (obj);
-           }
-           error ("Couldn't handle object %O.\n", obj);
-         };
+  mapping res;
+  // Avoid recursion in 404 messages.
+  if (id->root_id->misc->generate_file_not_found ||
+      //  The most popular 404 request ever? Skip the fancy error page.
+      id->not_query == "/favicon.ico") {
+    res = Roxen.http_string_answer("No such file", "text/plain");
+    res->error = 404;
+  } else {
+    id->root_id->misc->generate_file_not_found = 1;
+    string data = "<return code='404' />" + query("ZNoSuchFile");
+#if ROXEN_COMPAT <= 2.1
+    data = replace(data,({"$File", "$Me"}),
+                   ({"&page.virtfile;", "&roxen.server;"}));
+#endif
+    res = Roxen.http_rxml_answer( data, id, 0, "text/html" );
+    id->root_id->misc->generate_file_not_found = 0;
+  }
+  NOCACHE();
+  return res;
 }
 
-// FIXME: Handle reference cycles.
-mixed resolve_ext_fields (mixed value, ExtFieldResolver resolver)
+mapping auth_failed_file( RequestID id, string message )
 {
-  if (stringp (value) || intp (value) || floatp (value)) {
-    return value;
-  } else if (arrayp (value) || mappingp (value)) {
-    return map (value, resolve_ext_fields, resolver);
-  } else if (multisetp (value)) {
-    return map ((array)value, resolve_ext_fields, resolver);
-  } else if (objectp (value)) {
-    if (value->is_val_null || value->is_val_boolean) {
-      return value; // Handled by JSON encoder.
+  NOCACHE();
+
+  // Avoid recursion in 401 messages. This could occur if the 401
+  // messages used files that also cause access denied.
+  if(id->root_id->misc->generate_auth_failed)
+    return Roxen.http_low_answer(401, "<title>Access Denied</title>"
+                                 "<h2 align=center>Access Denied</h2>");
+  id->root_id->misc->generate_auth_failed = 1;
+
+  string data = "<return code='401' />" + query("ZAuthFailed");
+  mapping res = Roxen.http_rxml_answer( data, id, 0, "text/html" );
+  id->root_id->misc->generate_auth_failed = 0;
+  return res;
+}
+
+// this is not as trivial as it sounds. Consider gtext. :-)
+array open_file(string fname, string mode, RequestID id, void|int internal_get,
+                void|int recurse_count)
+{
+  mapping|int(0..1) file;
+  string oq = id->not_query;
+
+  if( id->conf && (id->conf != this_object()) )
+    return id->conf->open_file( fname, mode, id, internal_get, recurse_count );
+
+  if (recurse_count > 50) {
+    TRACE_ENTER ("Looped " + recurse_count +
+                 " times in internal redirects - giving up", 0);
+    TRACE_LEAVE ("");
+  }
+
+  else {
+    Configuration oc = id->conf;
+    id->not_query = fname;
+
+    // Make sure RXML defines don't survive <insert file/>.
+    // Fixes [bug 6631] where the return code for the outer
+    // RXML scope caused the <insert file/> to fail.
+    m_delete(id->misc, "defines");
+    m_delete(id->misc, "error_code");
+
+    TRY_FIRST_MODULES (file, open_file (fname, mode, id,
+                                        internal_get, recurse_count + 1));
+    fname = id->not_query;
+
+    if(search(mode, "R")!=-1) //  raw (as in not parsed..)
+    {
+      string f;
+      mode -= "R";
+      if(f = real_file(fname, id))
+      {
+        // report_debug("opening "+fname+" in raw mode.\n");
+        return ({ open(f, mode), ([]) });
+      }
+      // return ({ 0, (["error":302]) });
     }
 
-    return resolve_ext_fields (resolver (value), resolver);
-  } else if (functionp (value)) {
-    return resolve_ext_fields (value(), resolver);
+    if(mode!="r") {
+      id->not_query = oq;
+      return ({ 0, (["error":501, "data":"Not implemented." ]) });
+    }
+
+    if(!file)
+    {
+      file = get_file( id, 0, internal_get );
+      if(!file)
+        TRY_LAST_MODULES (file, open_file (id->not_query, mode, id,
+                                           internal_get, recurse_count + 1));
+    }
   }
 
-  error ("Don't know how to handle %O\n", value);
+  if(!mappingp(file))
+  {
+    if(id->misc->error_code)
+      file = Roxen.http_low_answer(id->misc->error_code, "Failed" );
+    else if(id->method!="GET"&&id->method != "HEAD"&&id->method!="POST")
+      file = Roxen.http_low_answer(501, "Not implemented.");
+    else
+      file = error_file( id );
+
+    id->not_query = oq;
+
+    return ({ 0, file });
+  }
+
+  if( file->data )
+  {
+    file->file = StringFile(file->data);
+    m_delete(file, "data");
+  }
+  id->not_query = oq;
+  return ({ file->file || StringFile(""), file });
 }
+
+
+mapping(string:array(mixed)) find_dir_stat(string file, RequestID id)
+{
+  string loc;
+  mapping(string:array(mixed)) dir = ([]);
+  mixed d, tmp;
+
+
+  file=replace(file, "//", "/");
+
+  if(!sizeof (file) || file[0] != '/')
+    file = "/" + file;
+
+  // FIXME: Should I append a "/" to file if missing?
+
+  TRACE_ENTER(sprintf("Request for directory and stat's \"%s\".", file), 0);
+
+#ifdef URL_MODULES
+#ifdef THREADS
+  Thread.MutexKey key;
+#endif
+  // Map URL-modules
+  foreach(url_modules(), function funp)
+  {
+    string of = id->not_query;
+    id->not_query = file;
+    LOCK(funp);
+    TRACE_ENTER("URL module", funp);
+    tmp=funp( id, file );
+    UNLOCK();
+
+    if(mappingp( tmp ))
+    {
+      id->not_query=of;
+#ifdef MODULE_DEBUG
+      report_debug("conf->find_dir_stat(\"%s\"): url_module returned mapping:%O\n",
+                  file, tmp);
+#endif /* MODULE_DEBUG */
+      TRACE_LEAVE("Returned mapping.");
+      TRACE_LEAVE("");
+      return 0;
+    }
+    if(objectp( tmp ))
+    {
+      mixed err;
+      id->misc->find_dir_stat_nest++;
+
+      file = id->not_query;
+      err = catch {
+        if( id->misc->find_dir_stat_nest < 20 )
+          tmp = (id->conf || this_object())->find_dir_stat( file, id );
+        else {
+          TRACE_LEAVE("Too deep recursion");
+          error("Too deep recursion in roxen::find_dir_stat() while mapping "
+                +file+".\n");
+        }
+      };
+      id->misc->find_dir_stat_nest = 0;
+      if(err)
+        throw(err);
+#ifdef MODULE_DEBUG
+      report_debug("conf->find_dir_stat(\"%s\"): url_module returned object:\n",
+                  file);
+#endif /* MODULE_DEBUG */
+      TRACE_LEAVE("Returned object.");
+      TRACE_LEAVE("Returning it.");
+      return tmp;	// FIXME: Return 0 instead?
+    }
+    id->not_query=of;
+    TRACE_LEAVE("");
+  }
+#endif /* URL_MODULES */
+
+  foreach(location_modules(), tmp)
+  {
+    loc = tmp[0];
+
+    TRACE_ENTER(sprintf("Location module [%s] ", loc), 0);
+    /* Note that only new entries are added. */
+    if(!search(file, loc))
+    {
+      /* file == loc + subpath */
+#ifdef MODULE_LEVEL_SECURITY
+      if(check_security(tmp[1], id)) {
+        TRACE_LEAVE("Security check failed.");
+        continue;
+      }
+#endif
+      RoxenModule c = function_object(tmp[1]);
+      string f = file[strlen(loc)..];
+      if (c->find_dir_stat) {
+        SIMPLE_TRACE_ENTER(c, "Calling find_dir_stat().");
+        if (d = c->find_dir_stat(f, id)) {
+          SIMPLE_TRACE_LEAVE("Returned mapping with %d entries.", sizeof (d));
+          dir = d | dir;
+        }
+        else
+          SIMPLE_TRACE_LEAVE("Returned zero.");
+      } else {
+        SIMPLE_TRACE_ENTER(c, "Calling find_dir().");
+        if(d = c->find_dir(f, id)) {
+          SIMPLE_TRACE_LEAVE("Returned array with %d entries.", sizeof (d));
+          dir = mkmapping(d, Array.map(d, lambda(string fn)
+                                          {
+                                            return c->stat_file(f + fn, id);
+                                          })) | dir;
+        }
+        else
+          SIMPLE_TRACE_LEAVE("Returned zero.");
+      }
+    } else if(search(loc, file)==0 && loc[strlen(file)-1]=='/' &&
+              (loc[0]==loc[-1]) && loc[-1]=='/' &&
+              (function_object(tmp[1])->stat_file(".", id))) {
+      /* loc == file + "/" + subpath + "/"
+       * and stat_file(".") returns non-zero.
+       */
+      TRACE_ENTER(sprintf("The file %O is on the path to the mountpoint %O.",
+                          file, loc), 0);
+      loc=loc[strlen(file)..];
+      sscanf(loc, "%s/", loc);
+      if (!dir[loc]) {
+        dir[loc] = ({ 0775, -3, 0, 0, 0, 0, 0 });
+      }
+      TRACE_LEAVE("");
+    }
+    TRACE_LEAVE("");
+  }
+  if(sizeof(dir))
+    return dir;
+}
+
+
+// Access a virtual file?
+
+array access(string file, RequestID id)
+{
+  string loc;
+  array s, tmp;
+
+  file=replace(file, "//", "/"); // "//" is really "/" here...
+
+  // Map location-modules.
+  foreach(location_modules(), tmp)
+  {
+    loc = tmp[0];
+    if((file+"/")==loc) {
+#ifdef MODULE_LEVEL_SECURITY
+      if(check_security(tmp[1], id)) continue;
+#endif
+      if(s=function_object(tmp[1])->access("", id))
+        return s;
+    } else if(!search(file, loc)) {
+#ifdef MODULE_LEVEL_SECURITY
+      if(check_security(tmp[1], id)) continue;
+#endif
+      if(s=function_object(tmp[1])->access(file[strlen(loc)..], id))
+        return s;
+    }
+  }
+  return 0;
+}
+
+string real_file(string file, RequestID id)
+//! Return the _real_ filename of a virtual file, if any.
+{
+  string loc;
+  string s;
+  array tmp;
+  file=replace(file, "//", "/"); // "//" is really "/" here...
+
+  if(!id) error("No id passed to real_file");
+
+  // Map location-modules.
+  foreach(location_modules(), tmp)
+  {
+    loc = tmp[0];
+    if(!search(file, loc))
+    {
+#ifdef MODULE_LEVEL_SECURITY
+      if(check_security(tmp[1], id)) continue;
+#endif
+      if(s=function_object(tmp[1])->real_file(file[strlen(loc)..], id))
+        return s;
+    }
+  }
+}
+
+array(int)|Stat try_stat_file(string s, RequestID id, int|void not_internal)
+{
+  RequestID fake_id;
+  array(int)|Stat res;
+
+  if(!objectp(id))
+    error("No ID passed to 'try_stat_file'\n");
+
+  // id->misc->common is here for compatibility; it's better to use
+  // id->root_id->misc.
+  if ( !id->misc )
+    id->misc = ([]);
+
+  fake_id = make_fake_id(s, id);
+
+  fake_id->misc->internal_get = !not_internal;
+  fake_id->method = "GET";
+
+  res = stat_file(fake_id->not_query, fake_id);
+
+  destruct (fake_id);
+  return res;
+}
+
+protected RequestID make_fake_id (string s, RequestID id)
+{
+  RequestID fake_id;
+
+  // id->misc->common is here for compatibility; it's better to use
+  // id->root_id->misc.
+  if ( !id->misc->common )
+    id->misc->common = ([]);
+
+  fake_id = id->clone_me();
+
+  fake_id->misc->common = id->misc->common;
+  fake_id->conf = this_object();
+
+  // HTTP transport encode the path.
+  // NB: This is required to make scan_for_query() happy.
+  s = string_to_utf8(s);
+  sscanf(s, "%s?%s", string path, string query);
+  s = map((path || s) / "/", Protocols.HTTP.percent_encode) * "/";
+  if (query) {
+    s += "?" + query;
+  }
+
+  fake_id->raw_url = s;
+
+  if (fake_id->scan_for_query)
+    // FIXME: If we're using e.g. ftp this doesn't exist. But the
+    // right solution might be that clone_me() in an ftp id object
+    // returns a vanilla (i.e. http) id instead when this function is
+    // used.
+    s = fake_id->scan_for_query (s);
+
+  s = http_decode_string(s);
+
+  catch { s = utf8_to_string(s); };
+
+  s = Roxen.fix_relative (s, id);
+
+  // s is sent to Unix API's that take NUL-terminated strings...
+  if (search(s, "\0") != -1)
+    sscanf(s, "%s\0", s);
+
+  fake_id->not_query=s;
+
+  return fake_id;
+}
+
+int|string try_get_file(string s, RequestID id,
+                        int|void stat_only, int|void nocache,
+                        int|void not_internal,
+                        mapping|void result_mapping)
+//! Convenience function used in quite a lot of modules. Tries to read
+//! a file into memory, and then returns the resulting string.
+//!
+//! NOTE: A 'file' can be a cgi script, which will be executed,
+//! resulting in a horrible delay.
+//!
+//! Unless the not_internal flag is set, this tries to get an external
+//! or internal file. Here "internal" means a file that never should be
+//! sent directly as a request response. E.g. an internal redirect to a
+//! different file is still considered "external" since its contents is
+//! sent directly to the client. Internal requests are recognized by
+//! the id->misc->internal_get flag being non-zero.
+{
+  string res;
+  RequestID fake_id = make_fake_id (s, id);
+  mapping m;
+
+  fake_id->misc->internal_get = !not_internal;
+  fake_id->method = "GET";
+
+  array a = open_file( fake_id->not_query, "r", fake_id, !not_internal );
+
+  m = a[1];
+
+  // Propagate vary callbacks from the subrequest.
+  id->propagate_vary_callbacks(fake_id);
+
+  if (result_mapping) {
+    foreach(indices(m), string i)
+      result_mapping[i] = m[i];
+    if (string|function(string:string) charset = fake_id->get_output_charset())
+      // Note that a "charset" field currently isn't supported very
+      // much in a response mapping. In particular, the http protocol
+      // module doesn't look at it.
+      //
+      // Maybe we should read in the result and decode it using this
+      // charset instead, just like we do in the m->raw case below.
+      result_mapping->charset = charset;
+    result_mapping->last_modified = fake_id->misc->last_modified;
+  }
+
+  if(a[0]) {
+    m->file = a[0];
+  }
+  else {
+    destruct (fake_id);
+    return 0;
+  }
+
+  CACHE( fake_id->misc->cacheable );
+
+  // Allow 2* and 3* error codes, not only a few specific ones.
+  if (!(< 0,2,3 >)[m->error/100]) {
+    destruct (fake_id);
+    return 0;
+  }
+
+  if(stat_only) {
+    destruct (fake_id);
+    return 1;
+  }
+
+  if(m->data)
+    res = m->data;
+  else
+    res="";
+
+  if( objectp(m->file) )
+  {
+    res += m->file->read();
+    if (m->file) {
+      // Some wrappers may destruct themselves in read()...
+      destruct(m->file);
+    }
+  }
+
+  if(m->raw) {
+    if (compat_level() > 5.0)
+      res = Roxen.parse_http_response (res, result_mapping, 0, "from " + s);
+    else {
+      // This function used to simply toss the headers and return the
+      // data as-is, losing the content type and charset. Need to be
+      // bug compatible with the lack of charset handling, since
+      // callers might be compensating. (The old code also deleted all
+      // CR's in the whole body, regardless of content type(!), but we
+      // don't have to be bug compatible with that at least.)
+      sscanf (res, "%*s\r\n\r\n%s", res) ||
+        sscanf (res, "%*s\n\n%s", res) ||
+        sscanf (res, "%*s\r\n%s", res) ||
+        sscanf (res, "%*s\n%s", res);
+    }
+  }
+
+  destruct (fake_id);
+
+  return res;
+}
+
+mapping(string:string) try_get_headers(string s, RequestID id,
+                                       int|void not_internal)
+//! Like @[try_get_file] but performs a HEAD request and only returns
+//! the response headers. Note that the returned headers are as they
+//! would be in a formatted response by the http protocol module,
+//! which is completely different from a response mapping.
+{
+  RequestID fake_id = make_fake_id (s, id);
+  mapping m;
+
+  fake_id->misc->internal_get = !not_internal;
+  fake_id->method = "HEAD";
+
+  array a = open_file( s, "r", fake_id, !not_internal );
+  if(a && a[1]) {
+    if (a[0]) a[0]->close();
+    m = a[1];
+  }
+  else {
+    destruct (fake_id);
+    return 0;
+  }
+
+  CACHE( fake_id->misc->cacheable );
+
+  if (!m->raw)
+    m = fake_id->make_response_headers (m);
+
+  else {
+    Roxen.HeaderParser hp = Roxen.HeaderParser();
+    array res;
+
+    if(m->data)
+      res = hp->feed (m->data);
+
+    if (!res && objectp(m->file))
+    {
+      hp->feed (m->file->read());
+      if (m->file) {
+        // Some wrappers may destruct themselves in read()...
+        destruct(m->file);
+      }
+    }
+
+    m = res && res[2];
+  }
+
+  destruct (fake_id);
+  return m;
+}
+
+mapping(string:mixed) try_put_file(string path, string data, RequestID id)
+{
+  TIMER_START(try_put_file);
+
+  // id->misc->common is here for compatibility; it's better to use
+  // id->root_id->misc.
+  if ( !id->misc )
+    id->misc = ([]);
+
+  RequestID fake_id = make_fake_id(path, id);
+
+  fake_id->root_id->misc->_request_depth++;
+  if(sub_req_limit && fake_id->root_id->misc->_request_depth > sub_req_limit)
+    error("Subrequest limit reached. (Possibly an insertion loop.)");
+
+  fake_id->method = "PUT";
+  fake_id->data = data;
+  fake_id->misc->len = sizeof(data);
+  fake_id->misc->internal_get = 1;
+
+  mapping(string:mixed) res = low_get_file(fake_id, 1);
+  TIMER_END(try_put_file);
+  return res;
+}
+
+int(0..1) is_file(string virt_path, RequestID id, int(0..1)|void internal)
+//! Is @[virt_path] a file in our virtual filesystem? If @[internal] is
+//! set, internal files is "visible" as well.
+{
+  if(internal) {
+    int(0..1) was_internal = id->misc->internal_get;
+    id->misc->internal_get = 1;
+    int(0..1) res = !!stat_file(virt_path, id);
+    if(!was_internal)
+      m_delete(id->misc, "internal_get");
+    return res;
+  }
+  if(stat_file(virt_path, id) ||
+     has_suffix(virt_path, "/internal-roxen-unit"))
+    return 1;
+  string f = (virt_path/"/")[-1];
+  if( sscanf(f, "internal-roxen-%s", f) ) {
+    if(internal_roxen_image(f, id) ||
+       has_prefix(f, "pixel-"))
+      return 1;
+    return 0;
+  }
+  if( sscanf(f, "internal-gopher-%s", f) &&
+      internal_gopher_image(f) )
+    return 1;
+  return 0;
+}
+
+array registered_urls = ({}), failed_urls = ({ });
+array do_not_log_patterns = 0;
+int start(int num)
+{
+  fix_my_url();
+
+#if 0
+  report_debug(sprintf("configuration:start():\n"
+                       "  registered_urls: ({ %{%O, %}})\n"
+                       "  failed_urls:     ({ %{%O, %}})\n"
+                       "  URLs:            ({ %{%O, %}})\n",
+                       registered_urls,
+                       failed_urls,
+                       query("URLs")));
+#endif /* 0 */
+
+  // Note: This is run as root if roxen is started as root
+  foreach( (registered_urls-query("URLs"))+failed_urls, string url )
+  {
+    registered_urls -= ({ url });
+    roxen.unregister_url(url, this_object());
+  }
+
+  failed_urls = ({ });
+
+  foreach( (query( "URLs" )-registered_urls), string url )
+  {
+    if( roxen.register_url( url, this_object() ) )
+      registered_urls += ({ url });
+    else
+      failed_urls += ({ url });
+  }
+  if( !datacache )
+    datacache = DataCache( );
+  else
+    datacache->init_from_variables();
+
+  parse_log_formats();
+  init_log_file();
+  do_not_log_patterns = query("NoLog");
+  if(!sizeof(do_not_log_patterns))
+    do_not_log_patterns = 0;
+
+  if( query("throttle") )
+  {
+    if( !throttler )
+      throttler=.throttler();
+    throttler->throttle(query("throttle_fill_rate"),
+                        query("throttle_bucket_depth"),
+                        query("throttle_min_grant"),
+                        query("throttle_max_grant"));
+  }
+  else if( throttler )
+  {
+    // This is done to give old connections more bandwidth.
+    throttler->throttle( 1000000000, 1000000000, // 800Mbit.
+                         1024, 65536 );
+    // and new connections does not even have to care.
+    throttler = 0;
+  }
+
+#ifdef SNMP_AGENT
+  if(query("snmp_process") && objectp(roxen->snmpagent))
+      roxen->snmpagent->add_virtserv(get_config_id());
+#endif
+
+  foreach(registered_urls, string url) {
+    mapping(string:string|Configuration|Protocol) port_info = roxen.urls[url];
+
+    foreach((port_info && port_info->ports) || ({}), Protocol prot) {
+      if ((prot->prot_name != "snmp") || (!prot->mib)) {
+        continue;
+      }
+
+      string path = port_info->path || "";
+      if (has_prefix(path, "/")) {
+        path = path[1..];
+      }
+      if (has_suffix(path, "/")) {
+        path = path[..sizeof(path)-2];
+      }
+
+      array(int) oid_suffix = ({ sizeof(path), @((array(int))path) });
+
+      ADT.Trie mib =
+        SNMP.SimpleMIB(query_oid(), oid_suffix,
+                       ({
+                         UNDEFINED,
+                         UNDEFINED,
+                         SNMP.String(query_name, "siteName"),
+                         SNMP.String(comment, "siteComment"),
+                         SNMP.Counter64(lambda() { return sent; },
+                                        "sent"),
+                         SNMP.Counter64(lambda() { return received; },
+                                        "received"),
+                         SNMP.Counter64(lambda() { return hsent; },
+                                        "sentHeaders"),
+                         SNMP.Counter64(lambda() { return requests; },
+                                        "numRequests"),
+                         UNDEFINED,	// NOTE: Reserved for modules!
+                         ({
+                           UNDEFINED,
+                           ({
+                             UNDEFINED,
+                             ({
+                               UNDEFINED,
+                               SNMP.Tick(lambda()
+                                            { return request_acc_time/10000; },
+                                 "requestTime",
+                                 "Accumulated total request time "
+                                 "in centiseconds."),
+                             }),
+                             ({
+                               UNDEFINED,
+                               SNMP.Counter(lambda() { return requests; },
+                                            "requestNumRuns",
+                                            "Total number of request runs."),
+                               SNMP.Counter(lambda() { return request_num_runs_001s; },
+                                            "requestNumRuns001s",
+                                            "Number of request runs longer than 0.01 seconds."),
+                               SNMP.Counter(lambda() { return request_num_runs_005s; },
+                                            "requestNumRuns005s",
+                                            "Number of request runs longer than 0.05 seconds."),
+                               SNMP.Counter(lambda() { return request_num_runs_015s; },
+                                            "requestNumRuns015s",
+                                            "Number of request runs longer than 0.15 seconds."),
+                               SNMP.Counter(lambda() { return request_num_runs_05s; },
+                                            "requestNumRuns05s",
+                                            "Number of request runs longer than 0.5 seconds."),
+                               SNMP.Counter(lambda() { return request_num_runs_1s; },
+                                            "requestNumRuns1s",
+                                            "Number of request runs longer than 1 second."),
+                               SNMP.Counter(lambda() { return request_num_runs_5s; },
+                                            "requestNumRuns5s",
+                                            "Number of request runs longer than 5 seconds."),
+                               SNMP.Counter(lambda() { return request_num_runs_15s; },
+                                            "requestNumRuns15s",
+                                            "Number of request runs longer than 15 seconds."),
+                             }),
+                           }),
+                           ({
+                             UNDEFINED,
+                             ({
+                               UNDEFINED,
+                               SNMP.Tick(lambda()
+                                            { return handle_acc_time/10000; },
+                                 "handleTime",
+                                 "Accumulated total handle time "
+                               "in centiseconds."),
+                             }),
+                             ({
+                               UNDEFINED,
+                               SNMP.Counter(lambda() { return requests; },
+                                            "handleNumRuns",
+                                            "Total number of handle runs."),
+                               SNMP.Counter(lambda() { return handle_num_runs_001s; },
+                                            "handleNumRuns001s",
+                                            "Number of handle runs longer than 0.01 seconds."),
+                               SNMP.Counter(lambda() { return handle_num_runs_005s; },
+                                            "handleNumRuns005s",
+                                            "Number of handle runs longer than 0.05 seconds."),
+                               SNMP.Counter(lambda() { return handle_num_runs_015s; },
+                                            "handleNumRuns015s",
+                                            "Number of handle runs longer than 0.15 seconds."),
+                               SNMP.Counter(lambda() { return handle_num_runs_05s; },
+                                            "handleNumRuns05s",
+                                            "Number of handle runs longer than 0.5 seconds."),
+                               SNMP.Counter(lambda() { return handle_num_runs_1s; },
+                                            "handleNumRuns1s",
+                                            "Number of handle runs longer than 1 second."),
+                               SNMP.Counter(lambda() { return handle_num_runs_5s; },
+                                            "handleNumRuns5s",
+                                            "Number of handle runs longer than 5 seconds."),
+                               SNMP.Counter(lambda() { return handle_num_runs_15s; },
+                                            "handleNumRuns15s",
+                                            "Number of handle runs longer than 15 seconds."),
+                             }),
+                           }),
+                           ({
+                             UNDEFINED,
+                             ({
+                               UNDEFINED,
+                               SNMP.Tick(lambda()
+                                            { return queue_acc_time/10000; },
+                                 "queueTime",
+                                 "Accumulated total queue time "
+                                 "in centiseconds."),
+                             }),
+                             ({
+                               UNDEFINED,
+                               SNMP.Counter(lambda() { return requests; },
+                                            "queueNumRuns",
+                                            "Total number of queue runs."),
+                               SNMP.Counter(lambda() { return queue_num_runs_001s; },
+                                            "queueNumRuns001s",
+                                            "Number of queue runs longer than 0.01 seconds."),
+                               SNMP.Counter(lambda() { return queue_num_runs_005s; },
+                                            "queueNumRuns005s",
+                                            "Number of queue runs longer than 0.05 seconds."),
+                               SNMP.Counter(lambda() { return queue_num_runs_015s; },
+                                            "queueNumRuns015s",
+                                            "Number of queue runs longer than 0.15 seconds."),
+                               SNMP.Counter(lambda() { return queue_num_runs_05s; },
+                                            "queueNumRuns05s",
+                                            "Number of queue runs longer than 0.5 seconds."),
+                               SNMP.Counter(lambda() { return queue_num_runs_1s; },
+                                            "queueNumRuns1s",
+                                            "Number of queue runs longer than 1 second."),
+                               SNMP.Counter(lambda() { return queue_num_runs_5s; },
+                                            "queueNumRuns5s",
+                                            "Number of queue runs longer than 5 seconds."),
+                               SNMP.Counter(lambda() { return queue_num_runs_15s; },
+                                            "queueNumRuns15s",
+                                            "Number of queue runs longer than 15 seconds."),
+                             }),
+                           })
+                         }),
+                         ({
+                           UNDEFINED,
+                           SNMP.Counter(lambda()
+                                        {
+                                          mapping stats =
+                                            datacache->get_cache_stats();
+                                          return stats->hits + stats->misses;
+                                        },
+                             "protCacheLookups",
+                             "Number of protocol cache lookups."),
+                           SNMP.Counter(lambda()
+                                        {
+                                          return
+                                            datacache->get_cache_stats()->hits;
+                                        },
+                             "protCacheHits",
+                             "Number of protocol cache hits."),
+                           SNMP.Counter(lambda()
+                                        {
+                                          return
+                                            datacache->get_cache_stats()->
+                                            misses;
+                                        },
+                             "protCacheMisses",
+                             "Number of protocol cache misses."),
+                           SNMP.Gauge(lambda()
+                                      {
+                                        return
+                                          datacache->get_cache_stats()->entries;
+                                      },
+                             "protCacheEntries",
+                             "Number of protocol cache entries."),
+                           SNMP.Gauge(lambda()
+                                      {
+                                        return
+                                          datacache->get_cache_stats()->
+                                          max_size / 1024;
+                                      },
+                             "protCacheMaxSize",
+                             "Maximum size of protocol cache in KiB."),
+                           SNMP.Gauge(lambda()
+                                      {
+                                        return
+                                          datacache->get_cache_stats()->
+                                          current_size / 1024;
+                                      },
+                             "protCacheCurrSize",
+                             "Current size of protocol cache in KiB."),
+                         })
+                       }));
+      SNMP.set_owner(mib, this_object());
+      prot->mib->merge(mib);
+    }
+  }
+
+  if (retrieve ("EnabledModules", this)["config_filesystem#0"])
+    return 1;			// Signal that this is the admin UI config.
+  return 0;
+}
+
+// ([func: ([mod_name: ({cb, cb, ...})])])
+protected mapping(string:
+                  mapping(string:
+                          array(function(RoxenModule,mixed...:void))))
+  module_pre_callbacks = ([]), module_post_callbacks = ([]);
+
+void add_module_pre_callback (string mod_name, string func,
+                              function(RoxenModule,mixed...:void) cb)
+{
+  ASSERT_IF_DEBUG ((<"start", "stop">)[func]);
+  mapping(string:array(function(RoxenModule,mixed...:void))) func_cbs =
+    module_pre_callbacks[func] || (module_pre_callbacks[func] = ([]));
+  if (func_cbs[mod_name] && has_value (func_cbs[mod_name], cb))
+    return;
+  func_cbs[mod_name] += ({cb});
+}
+
+void delete_module_pre_callback (string mod_name, string func,
+                                 function(RoxenModule,mixed...:void) cb)
+{
+  if (mapping(string:array(function(RoxenModule,mixed...:void))) func_cbs =
+      module_pre_callbacks[func])
+    if (func_cbs[mod_name])
+      func_cbs[mod_name] -= ({cb});
+}
+
+void add_module_post_callback (string mod_name, string func,
+                               function(RoxenModule,mixed...:void) cb)
+{
+  ASSERT_IF_DEBUG ((<"start", "stop">)[func]);
+  mapping(string:array(function(RoxenModule,mixed...:void))) func_cbs =
+    module_post_callbacks[func] || (module_post_callbacks[func] = ([]));
+  if (func_cbs[mod_name] && has_value (func_cbs[mod_name], cb))
+    return;
+  func_cbs[mod_name] += ({cb});
+}
+
+void delete_module_post_callback (string mod_name, string func,
+                                  function(RoxenModule,mixed...:void) cb)
+{
+  if (mapping(string:array(function(RoxenModule,mixed...:void))) func_cbs =
+      module_post_callbacks[func])
+    if (func_cbs[mod_name])
+      func_cbs[mod_name] -= ({cb});
+}
+
+void call_module_func_with_cbs (RoxenModule mod, string func, mixed... args)
+{
+  string mod_name;
+
+  if (mapping(string:array(function(RoxenModule,mixed...:void))) func_cbs =
+      module_pre_callbacks[func]) {
+    sscanf (mod->module_local_id(), "%[^#]", mod_name);
+    array(function(RoxenModule,mixed...:void)) cbs;
+    if (array(function(RoxenModule,mixed...:void)) a = func_cbs[mod_name]) {
+      func_cbs[mod_name] = (a -= ({0}));
+      cbs = a;
+    }
+    if (array(function(RoxenModule,mixed...:void)) a = func_cbs[0]) {
+      func_cbs[0] = (a -= ({0}));
+      if (cbs) cbs += a; else cbs = a;
+    }
+    if (cbs) {
+      foreach (cbs, function(RoxenModule,mixed...:void) cb) {
+#ifdef MODULE_CB_DEBUG
+        werror ("Calling callback before %O->%s: %O\n", mod, func, cb);
+#endif
+        if (mixed err = catch (cb (mod, @args)))
+          report_error ("Error calling callback %O before %O->%s:\n%s\n",
+                        cb, mod, func, describe_backtrace (err));
+      }
+    }
+  }
+
+  // Exceptions thrown here are the responsibility of the caller.
+#ifdef MODULE_CB_DEBUG
+  werror ("Calling %O->%s (%s)\n", mod, func,
+          map (args, lambda (mixed arg)
+                       {return sprintf ("%O", arg);}) * ", ");
+#endif
+  mod[func] (@args);
+
+  if (mapping(string:array(function(RoxenModule,mixed...:void))) func_cbs =
+      module_post_callbacks[func]) {
+    if (!mod_name)
+      sscanf (otomod[mod] || mod->module_local_id(), "%[^#]", mod_name);
+    array(function(RoxenModule,mixed...:void)) cbs;
+    if (array(function(RoxenModule,mixed...:void)) a = func_cbs[mod_name]) {
+      func_cbs[mod_name] = (a -= ({0}));
+      cbs = a;
+    }
+    if (array(function(RoxenModule,mixed...:void)) a = func_cbs[0]) {
+      func_cbs[0] = (a -= ({0}));
+      if (cbs) cbs += a; else cbs = a;
+    }
+    if (cbs) {
+      foreach (cbs, function(RoxenModule,mixed...:void) cb) {
+#ifdef MODULE_CB_DEBUG
+        werror ("Calling callback after %O->%s: %O\n", mod, func, cb);
+#endif
+        if (mixed err = catch (cb (mod, @args)))
+          report_error ("Error calling callback %O after %O->%s:\n%s\n",
+                        cb, mod, func, describe_backtrace (err));
+      }
+    }
+  }
+}
+
+void save_me()
+{
+  save_one( 0 );
+}
+
+void save(int|void all)
+//! Save this configuration. If all is included, save all configuration
+//! global variables as well, otherwise only all module variables.
+{
+  if(all)
+  {
+    store("spider#0", variables, 0, this_object());
+    start(2);
+  }
+
+  store( "EnabledModules", enabled_modules, 1, this_object());
+  foreach(indices(modules), string modname)
+  {
+    foreach(indices(modules[modname]->copies), int i)
+    {
+      RoxenModule mod = modules[modname]->copies[i];
+      store(modname+"#"+i, mod->query(), 0, this);
+      if (mixed err = mod->start && catch {
+          call_module_func_with_cbs (mod, "start", 2, this, 0);
+        })
+        report_error("Error calling start in module.\n%s",
+                     describe_backtrace (err));
+    }
+  }
+  invalidate_cache();
+}
+
+int save_one( RoxenModule o )
+//! Save all variables in a given module.
+{
+  if(!o)
+  {
+    store("spider#0", variables, 0, this_object());
+    start(2);
+    return 1;
+  }
+  string q = otomod[ o ];
+  if( !q )
+    error("Invalid module");
+
+  store(q, o->query(), 0, this_object());
+  invalidate_cache();
+  mixed error;
+  if( o->start &&
+      (error = catch( call_module_func_with_cbs (o, "start", 2, this, 0) )) )
+  {
+    if( objectp(error ) )
+      error = (array)error;
+    if( sizeof(error)>1 && arrayp( error[1] ) )
+    {
+      int i;
+      for( i = 0; i<sizeof( error[1] ); i++ )
+        if( error[1][i][2] == save_one )
+          break;
+      error[1] = error[1][i+1..];
+    }
+    if( o->report_error )
+      o->report_error( "Call to start failed.\n"+describe_backtrace( error ) );
+    else
+      report_error( "Call to start failed.\n"+describe_backtrace( error ));
+  }
+  invalidate_cache();
+  return 1;
+}
+
+int save_one_without_cbs(RoxenModule o)
+//! Save all variables in a given module but don't call any callbacks.
+{
+  if (o) {
+    string q = otomod[ o ];
+    if (!q)
+      error("Invalid module");
+    store(q, o->query(), 0, this_object());
+    invalidate_cache();
+  }
+  return 1;
+}
+
+RoxenModule reload_module( string modname )
+{
+  RoxenModule old_module = find_module( modname );
+  sscanf (modname, "%s#%d", string base_modname, int mod_copy);
+  ModuleInfo mi = roxen.find_module( base_modname );
+
+  if( !old_module ) return 0;
+
+  // Temporarily shift out of the rxml parsing context if we're inside
+  // any (e.g. due to delayed loading from inside the admin
+  // interface).
+  RXML.Context old_ctx = RXML.get_context();
+  RXML.set_context (0);
+  mixed err = catch {
+
+      master()->clear_compilation_failures();
+
+      if( !old_module->not_a_module )
+      {
+        save_one( old_module );
+        master()->refresh_inherit( object_program( old_module ) );
+        master()->refresh( object_program( old_module ), 1 );
+      }
+
+      array old_error_log = (array) old_module->error_log;
+
+      RoxenModule nm;
+
+      // Load up a new instance.
+      nm = mi->instance( this_object(), 0, mod_copy);
+      // If this is a faked module, let's call it a failure.
+      if (nm->module_is_disabled)
+        report_notice (LOC_C(1047, "Module is disabled") + "\n");
+      else if( nm->not_a_module )
+      {
+        old_module->report_error(LOC_C(385,"Reload failed")+"\n");
+        RXML.set_context (old_ctx);
+        return old_module;
+      }
+
+      disable_module( modname, nm );
+      destruct( old_module );
+
+      mixed err = catch {
+          mi->update_with( nm,0 ); // This is sort of nessesary...
+        };
+      if (err)
+        if (stringp (err)) {
+          // Error from the register_module call. We can't enable the old
+          // module now, and I don't dare changing the order so that
+          // register_module starts to get called before the old module is
+          // destructed. /mast
+          report_error (err);
+          report_error(LOC_C(385,"Reload failed")+"\n");
+          RXML.set_context (old_ctx);
+          return 0;			// Use a placeholder module instead?
+        }
+        else
+          throw (err);
+      enable_module( modname, nm, mi );
+
+      foreach (old_error_log, [string msg, array(int) times])
+        nm->error_log[msg] += times;
+
+      nm->report_notice(LOC_C(11, "Reloaded %s.")+"\n", mi->get_name());
+      RXML.set_context (old_ctx);
+      return nm;
+
+    };
+  RXML.set_context (old_ctx);
+  throw (err);
+}
+
+void reload_all_modules()
+{
+  if (!inited)
+    enable_all_modules();
+  else {
+    foreach (enabled_modules; string modname;)
+      reload_module (modname);
+  }
+}
+
+#ifdef THREADS
+Thread.Mutex enable_modules_mutex = Thread.Mutex();
+#define MODULE_LOCK(TYPE) \
+  Thread.MutexKey enable_modules_lock = enable_modules_mutex->lock (TYPE)
+#else
+#define MODULE_LOCK(TYPE)
+#endif
+
+protected int enable_module_batch_msgs;
+
+RoxenModule enable_module( string modname, RoxenModule|void me,
+                           ModuleInfo|void moduleinfo,
+                           int|void nostart, int|void nosave )
+{
+  MODULE_LOCK (2);
+  int id;
+  ModuleCopies module;
+  mixed err;
+  int module_type;
+
+  if( forcibly_added[modname] == 2 )
+    return search(otomod, modname);
+
+  if( datacache ) datacache->flush();
+
+  if( sscanf(modname, "%s#%d", modname, id ) != 2 )
+    while( modules[ modname ] && modules[ modname ][ id ] )
+      id++;
+
+#ifdef DEBUG
+  if (mixed init_info = roxen->bootstrap_info->get())
+    if (arrayp (init_info))
+      error ("Invalid recursive call to enable_module while enabling %O/%s.\n",
+             init_info[0], init_info[1]);
+#endif
+
+#ifdef MODULE_DEBUG
+  int start_time = gethrtime();
+#endif
+
+  if( !moduleinfo )
+  {
+    moduleinfo = roxen->find_module( modname );
+
+    if (!moduleinfo)
+    {
+      report_warning("Failed to load %s. The module probably "
+                     "doesn't exist in the module path.\n", modname);
+      got_no_delayed_load = -1;
+      return 0;
+    }
+  }
+
+  string descr = moduleinfo->get_name() + (id ? " copy " + (id + 1) : "");
+  //  sscanf(descr, "%*s: %s", descr);
+
+#ifdef MODULE_DEBUG
+  if (enable_module_batch_msgs)
+    report_debug(" %-43s... \b", descr );
+  else
+    report_debug("Enabling " + descr + "\n");
+#endif
+
+  module = modules[ modname ];
+
+  if(!module)
+    modules[ modname ] = module = ModuleCopies();
+
+  if( !me )
+  {
+    if(err = catch(me = moduleinfo->instance(this_object(), 0, id)))
+    {
+#ifdef MODULE_DEBUG
+      if (enable_module_batch_msgs) report_debug("\bERROR\n");
+      if (err != "") {
+#endif
+        string bt=describe_backtrace(err);
+        report_error("enable_module(): " +
+                     LOC_M(41, "Error while initiating module copy of %s%s"),
+                     moduleinfo->get_name(), (bt ? ":\n"+bt : "\n"));
+#ifdef MODULE_DEBUG
+      }
+#endif
+      got_no_delayed_load = -1;
+      return module[id];
+    }
+  }
+
+  if(module[id] && module[id] != me)
+  {
+    // Don't know when this happens, because reload_module has already
+    // called disable_module on the old instance.
+    if( module[id]->stop ) {
+      if (err = catch( call_module_func_with_cbs (module[id], "stop", me) )) {
+        string bt=describe_backtrace(err);
+        report_error("disable_module(): " +
+                     LOC_M(44, "Error while disabling module %s%s"),
+                     descr, (bt ? ":\n"+bt : "\n"));
+      }
+    }
+  }
+
+  me->set_configuration( this_object() );
+
+  //  Add a hidden notes field to all modules (including those that don't
+  //  match MODULE_TYPE_MASK such as MODULE_SECURITY).
+  if (err = catch {
+      me->defvar("_notes", Variable.String("", VAR_INVISIBLE, "Notes", ""));
+    }) {
+    throw(err);
+  }
+
+  module_type = moduleinfo->type;
+  if (module_type & MODULE_TYPE_MASK)
+  {
+    if(!(module_type & MODULE_CONFIG))
+    {
+      if (err = catch {
+          me->defvar("_priority", Variable.
+                     Priority(5, 0, DLOCALE(12, "Priority"),
+                              DLOCALE(13, "<p>The priority of the module.</p>\n"
+                                      "<p>Modules with the same priority "
+                                      "can be assumed to be "
+                                      "called in random order.</p>\n")))->
+            set_range(0, query("max_priority"));
+        }) {
+        throw(err);
+      }
+    }
+
+#ifdef MODULE_LEVEL_SECURITY
+    if( (module_type & ~(MODULE_LOGGER|MODULE_PROVIDER|MODULE_USERDB)) != 0 )
+    {
+//       me->defvar("_sec_group", "user", DLOCALE(14, "Security: Realm"),
+// 		 TYPE_STRING,
+// 		 DLOCALE(15, "The realm to use when requesting password from the "
+// 			 "client. Usually used as an informative message to the "
+// 			 "user."));
+
+      me->defvar("_seclevels", "", DLOCALE(16, "Security: Patterns"),
+                 TYPE_TEXT_FIELD,
+                 DLOCALE(245,
+                         "The syntax is:\n"
+                         " \n<dl>"
+                         "  <dt><b>userdb</b> <i>userdatabase module</i></dt>\n"
+                         "  <dd> Select a non-default userdatabase module. The default is to "
+                         " search all modules. The userdatabase module config_userdb is always "
+                         " present, and contains the configuration users</dd>\n"
+                         "<dt><b>authmethod</b> <i>authentication module</i></dt>\n"
+                         "<dd>Select a non-default authentication method.</dd>"
+                         "<dt><b>realm</b> <i>realm name</i></dt>\n"
+                         "<dd>The realm is used when user authentication info is requested</dd>"
+                         "</dl>\n"
+                         "  Below, CMD is one of 'allow' and 'deny'\n"
+                         " <dl>\n"
+                         "  <dt>CMD <b>ip</b>=<i>ip/bits</i>  [return]<br />\n"
+                         "  CMD <b>ip</b>=<i>ip:mask</i>  [return] <br />\n"
+                         "  CMD <b>ip</b>=<i>pattern[,pattern,...]</i>  [return] <br /></dt>\n"
+                         "  <dd>Match the remote IP-address.</dd>\n"
+                         " \n"
+                         "  <dt>CMD <b>user</b>=<i>name[,name,...]</i>  [return]</dt>\n"
+                         "  <dd>Requires an authenticated user. If the user name 'any' is used, any "
+                         "valid user will be OK; if the user name 'ANY' is used, "
+                         "a valid user is preferred, but not required. "
+                         "Otherwise, one of the listed users is required.</dd>"
+                         "  <dt>CMD <b>group</b>=<i>name[,name,...]</i> [return]</dt>\n"
+                         "<dd>Requires an authenticated user with a group. If the group name "
+                         " 'any' is used, any valid group will be OK. Otherwise, one of the "
+                         "listed groups are required.</dd>\n"
+                         " \n"
+                         "<dt>CMD <b>dns</b>=<i>pattern[,pattern,...]</i>           [return]</dt>\n"
+                         "<dd>Require one of the specified DNS domain-names</dd>"
+                         " \n"
+                         "<dt>CMD <b>time</b>=<i>HH:mm-HH:mm</i>   [return]</dt>\n"
+                         "<dd>Only allow access to the module from the first time to the "
+                         " second each day. Both times should be specified in 24-hour "
+                         " HH:mm format.</dd>\n"
+                         "<dt>CMD <b>day</b>=<i>day[,day,...]</i> [return]</dt>\n"
+                         "<dd>Only allow access during certain days. Day is either a numerical "
+                         "    value (Monday=1, Sunday=7) or a string (monday, tuesday etc)</dd>"
+                         "</dl><p>\n"
+                         "  pattern is always a glob pattern (* = any characters, ? = any character).\n"
+                         "</p><p>\n"
+                         "  return means that reaching this command results in immediate\n"
+                         "  return, only useful for 'allow'.</p>\n"
+                         " \n"
+                         " <p>'deny' always implies a return, no futher testing is done if a\n"
+                         " 'deny' match.</p>\n"));
+
+      if(!(module_type & MODULE_PROXY))
+      {
+        me->defvar("_seclvl",  0, DLOCALE(18, "Security: Security level"),
+                   TYPE_INT,
+                   DLOCALE(305, "The modules security level is used to determine if a "
+                   " request should be handled by the module."
+                   "\n<p><h2>Security level vs Trust level</h2>"
+                   " Each module has a configurable <i>security level</i>."
+                   " Each request has an assigned trust level. Higher"
+                   " <i>trust levels</i> grants access to modules with higher"
+                   " <i>security levels</i>."
+                   "\n<p><h2>Definitions</h2><ul>"
+                   " <li>A requests initial trust level is infinitely high.</li>"
+                   " <li> A request will only be handled by a module if its"
+                   "     <i>trust level</i> is higher or equal to the"
+                   "     <i>security level</i> of the module.</li>"
+                   " <li> Each time the request is handled by a module the"
+                   "     <i>trust level</i> of the request will be set to the"
+                   "      lower of its <i>trust level</i> and the modules"
+                   "     <i>security level</i>, <i>unless</i> the security "
+                   "        level of the module is 0, which is a special "
+                   "        case and means that no change should be made.</li>"
+                   " </ul></p>"
+                   "\n<p><h2>Example</h2>"
+                   " Modules:<ul>"
+                   " <li>  User filesystem, <i>security level</i> 1</li>"
+                   " <li>  Filesystem module, <i>security level</i> 3</li>"
+                   " <li>  CGI module, <i>security level</i> 2</li>"
+                   " </ul></p>"
+                   "\n<p>A request handled by \"User filesystem\" is assigned"
+                   " a <i>trust level</i> of one after the <i>security"
+                   " level</i> of that module. That request can then not be"
+                   " handled by the \"CGI module\" since that module has a"
+                   " higher <i>security level</i> than the requests trust"
+                   " level.</p>"
+                   "\n<p>On the other hand, a request handled by the the"
+                   " \"Filesystem module\" could later be handled by the"
+                   " \"CGI module\".</p>"));
+
+      } else {
+        me->definvisvar("_seclvl", -10, TYPE_INT); /* A very low one */
+      }
+    }
+#endif
+  } else {
+    me->defvar("_priority", 0, "", TYPE_INT, "", 0, 1);
+  }
+
+  if (!module[id])
+    counters[moduleinfo->counter]++;
+
+  module[ id ] = me;
+  otomod[ me ] = modname+"#"+id;
+  module_set_counter++;
+
+  // Below we may have recursive calls to this function. They may
+  // occur already in setvars due to e.g. automatic dependencies in
+  // Variable.ModuleChoice.
+
+  mapping(string:mixed) stored_vars = retrieve(modname + "#" + id, this_object());
+  int has_stored_vars = sizeof (stored_vars); // A little ugly, but it suffices.
+  me->setvars(stored_vars);
+
+  if (me->not_a_module) nostart = 1;
+
+  if(!nostart) call_start_callbacks( me, moduleinfo, module );
+
+#ifdef MODULE_DEBUG
+  if (enable_module_batch_msgs) {
+    if(moduleinfo->config_locked[this_object()])
+      report_debug("\bLocked %6.1fms\n", (gethrtime()-start_time)/1000.0);
+    else if (me->not_a_module)
+      report_debug("\bN/A %6.1fms\n", (gethrtime()-start_time)/1000.0);
+    else
+      report_debug("\bOK %6.1fms\n", (gethrtime()-start_time)/1000.0);
+  }
+#else
+  if(moduleinfo->config_locked[this_object()])
+    report_error("   Error: \"%s\" not loaded (license restriction).\n",
+                 moduleinfo->get_name());
+  else if (me->not_a_module)
+    report_debug("   Note: \"%s\" not available.\n", moduleinfo->get_name());
+#endif
+  if( !enabled_modules[modname+"#"+id] )
+  {
+    enabled_modules[modname+"#"+id] = 1;
+    if(!nosave)
+      store( "EnabledModules", enabled_modules, 1, this_object());
+  }
+
+  if (!has_stored_vars && !nosave)
+    store (modname + "#" + id, me->query(), 0, this_object());
+
+  if( me->no_delayed_load && got_no_delayed_load >= 0 )
+    got_no_delayed_load = 1;
+
+  return me;
+}
+
+void call_start_callbacks( RoxenModule me,
+                           ModuleInfo moduleinfo,
+                           ModuleCopies module,
+                           void|int newly_added)
+{
+  call_low_start_callbacks(  me, moduleinfo, module );
+  call_high_start_callbacks (me, moduleinfo, newly_added);
+}
+
+void call_low_start_callbacks( RoxenModule me,
+                               ModuleInfo moduleinfo,
+                               ModuleCopies module )
+{
+  if(!me) return;
+  if(!moduleinfo) return;
+  if(!module) return;
+
+  int module_type = moduleinfo->type, pr;
+  mixed err;
+  if (err = catch(pr = me->query("_priority")))
+  {
+#ifdef MODULE_DEBUG
+    if (enable_module_batch_msgs) report_debug("\bERROR\n");
+#endif
+    string bt=describe_backtrace(err);
+    report_error(LOC_M(41, "Error while initiating module copy of %s%s"),
+                        moduleinfo->get_name(), (bt ? ":\n"+bt : "\n"));
+    pr = 3;
+  }
+
+  sorted_modules += ({ me });
+  sorted_module_types += ({ module_type });
+
+  api_module_cache |= me->api_functions();
+
+  if(module_type & MODULE_EXTENSION)
+  {
+    report_error("%s is an MODULE_EXTENSION, that type is no "
+                 "longer available.\nPlease notify the modules writer.\n"
+                 "Suitable replacement types include MODULE_FIRST and "
+                 " MODULE_LAST.\n", moduleinfo->get_name());
+  }
+
+  if(module_type & MODULE_TYPES)
+  {
+    types_module = me;
+    types_fun = me->type_from_extension;
+  }
+
+  if(module_type & MODULE_TAG)
+    add_parse_module( me );
+
+  if(module_type & MODULE_DIRECTORIES)
+    if (me->parse_directory)
+      dir_module = me;
+
+  sort_modules();
+
+  foreach(registered_urls, string url) {
+    mapping(string:string|Configuration|Protocol) port_info = roxen.urls[url];
+
+    foreach((port_info && port_info->ports) || ({}), Protocol prot) {
+      if ((prot->prot_name != "snmp") || (!prot->mib)) {
+        continue;
+      }
+
+      string path = port_info->path || "";
+      if (has_prefix(path, "/")) {
+        path = path[1..];
+      }
+      if (has_suffix(path, "/")) {
+        path = path[..sizeof(path)-2];
+      }
+
+      array(int) oid_suffix = ({ sizeof(path), @((array(int))path) });
+
+      ADT.Trie sub_mib = generate_module_mib(query_oid() + ({ 8, 1 }),
+                                             oid_suffix, me, moduleinfo, module);
+      SNMP.set_owner(sub_mib, this_object(), me);
+
+      prot->mib->merge(sub_mib);
+
+      if (me->query_snmp_mib) {
+        array(int) segment = generate_module_oid_segment(me);
+        sub_mib = me->query_snmp_mib(query_oid() + ({ 8, 2 }) +
+                                     segment[..sizeof(segment)-2],
+                                     oid_suffix + ({ segment[-1] }));
+        SNMP.set_owner(sub_mib, this_object(), me);
+        prot->mib->merge(sub_mib);
+      }
+    }
+  }
+}
+
+void call_high_start_callbacks (RoxenModule me, ModuleInfo moduleinfo,
+                                void|int newly_added)
+{
+  // This is icky, but I don't know if it's safe to remove. /mast
+  if(!me) return;
+  if(!moduleinfo) return;
+
+  mixed err;
+  if((me->start) &&
+     (err = catch( call_module_func_with_cbs (me, "start",
+                                              0, this, newly_added) ) ) )
+  {
+#ifdef MODULE_DEBUG
+    if (enable_module_batch_msgs)
+      report_debug("\bERROR\n");
+#endif
+    string bt=describe_backtrace(err);
+    report_error(LOC_M(41, "Error while initiating module copy of %s%s"),
+                        moduleinfo->get_name(), (bt ? ":\n"+bt : "\n"));
+    got_no_delayed_load = -1;
+  }
+  if( inited && me->ready_to_receive_requests )
+    if( mixed q = catch( me->ready_to_receive_requests( this_object() ) ) )
+    {
+#ifdef MODULE_DEBUG
+      if (enable_module_batch_msgs) report_debug("\bERROR\n");
+#endif
+      report_error( "While calling ready_to_receive_requests:\n"+
+                    describe_backtrace( q ) );
+      got_no_delayed_load = -1;
+    }
+}
+
+// Called from the administration interface.
+string check_variable(string name, mixed value)
+{
+  switch(name)
+  {
+//    case "MyWorldLocation":
+//     if(strlen(value)<7 || value[-1] != '/' ||
+//        !(sscanf(value,"%*s://%*s/")==2))
+//       return LOCALE->url_format();
+//     return 0;
+  case "MyWorldLocation":
+  case "URLs":
+    fix_my_url();
+    return 0;
+//    case "throttle":
+//      // There was code here to sett the throttling. That's not a
+//      // good idea. Moved to start. The code now also avoids
+//      // creating new throttle objects each time a value is changed.
+//    case "throttle_fill_rate":
+//    case "throttle_bucket_depth":
+//    case "throttle_min_grant":
+//    case "throttle_max_grant":
+//      return 0;
+#ifdef SNMP_AGENT
+  case "snmp_process":
+    if (objectp(roxen->snmpagent)) {
+      int cid = get_config_id();
+      value ? roxen->snmpagent->add_virtserv(cid) : roxen->snmpagent->del_virtserv(cid);
+    }
+    return 0;
+#endif
+  }
+}
+
+void module_changed( ModuleInfo moduleinfo,
+                     RoxenModule me  )
+{
+  clean_up_for_module( moduleinfo, me );
+  call_low_start_callbacks( me,
+                            moduleinfo,
+                            modules[ moduleinfo->sname ] );
+}
+
+void clean_up_for_module( ModuleInfo moduleinfo,
+                          RoxenModule me )
+{
+  int i = 0;
+  // Loop for paranoia reasons.
+  while((i < sizeof(sorted_modules)) &&
+        (i = search(sorted_modules, me, i)) >= 0) {
+    sorted_modules = sorted_modules[..i-1] + sorted_modules[i+1..];
+    sorted_module_types = sorted_module_types[..i-1] +
+      sorted_module_types[i+1..];
+  }
+
+  if(moduleinfo->type & MODULE_TYPES)
+  {
+    types_module = 0;
+    types_fun = 0;
+  }
+
+  if(moduleinfo->type & MODULE_TAG)
+    remove_parse_module( me );
+
+  if( moduleinfo->type & MODULE_DIRECTORIES )
+    dir_module = 0;
+
+  api_module_cache -= me->api_functions();
+
+  foreach(registered_urls, string url) {
+    mapping(string:string|Configuration|Protocol) port_info = roxen.urls[url];
+    foreach((port_info && port_info->ports) || ({}), Protocol prot) {
+      if ((prot->prot_name != "snmp") || (!prot->mib)) {
+        continue;
+      }
+
+      SNMP.remove_owned(prot->mib, this_object(), me);
+    }
+  }
+
+  invalidate_cache();
+}
+
+int disable_module( string modname, void|RoxenModule new_instance )
+{
+  MODULE_LOCK (2);
+  RoxenModule me;
+  int id;
+  sscanf(modname, "%s#%d", modname, id );
+
+  if( datacache ) datacache->flush();
+
+  ModuleInfo moduleinfo =  roxen.find_module( modname );
+  mapping module = modules[ modname ];
+  string descr = moduleinfo->get_name() + (id ? " copy " + (id + 1) : "");
+
+  if(!module)
+  {
+    report_error("disable_module(): " +
+                 LOC_M(42, "Failed to disable module:\n"
+                        "No module by that name: \"%s\".\n"), modname);
+    return 0;
+  }
+
+  me = module[id];
+  m_delete(module->copies, id);
+  module_set_counter++;
+
+  if(!sizeof(module->copies))
+    m_delete( modules, modname );
+
+  if (moduleinfo->counter) {
+    counters[moduleinfo->counter]--;
+  }
+
+  invalidate_cache();
+
+  if(!me)
+  {
+    report_error("disable_module(): " +
+                 LOC_M(43, "Failed to disable module \"%s\".\n"),
+                 descr);
+    return 0;
+  }
+
+  if(me->stop)
+    if (mixed err = catch (
+          call_module_func_with_cbs (me, "stop", new_instance)
+        )) {
+      string bt=describe_backtrace(err);
+      report_error("disable_module(): " +
+                   LOC_M(44, "Error while disabling module %s%s"),
+                   descr, (bt ? ":\n"+bt : "\n"));
+    }
+
+#ifdef MODULE_DEBUG
+  report_debug("Disabling "+descr+"\n");
+#endif
+
+  clean_up_for_module( moduleinfo, me );
+
+  if( !new_instance )
+  {
+    // Not a reload, so it's being dropped.
+    m_delete( enabled_modules, modname + "#" + id );
+    m_delete( forcibly_added, modname + "#" + id );
+    store( "EnabledModules",enabled_modules, 1, this_object());
+    destruct(me);
+  }
+  return 1;
+}
+
+RoxenModule find_module(string name)
+//! Return the module corresponding to the name (eg "rxmlparse",
+//! "rxmlparse#0" or "filesystem#1") or zero, if there was no such
+//! module. The string is on the same format as the one returned by
+//! @[RoxenModule.module_local_id].
+{
+  int id;
+  sscanf(name, "%s#%d", name, id);
+  if(modules[name])
+    return modules[name]->copies[id];
+  return 0;
+}
+
+mapping forcibly_added = ([]);
+int add_modules( array(string) mods, int|void now )
+{
+#ifdef MODULE_DEBUG
+  int wr;
+#endif
+  foreach (mods, string mod)
+  {
+    sscanf( mod, "%s#", mod );
+    if( ((now && !modules[ mod ]) ||
+         !enabled_modules[ mod+"#0" ] )
+        && !forcibly_added[ mod+"#0" ])
+    {
+#ifdef MODULE_DEBUG
+      if( !wr++ )
+        if (enable_module_batch_msgs)
+          report_debug("\b[ adding req module" + (sizeof (mods) > 1 ? "s" : "") + "\n");
+        else
+          report_debug("Adding required module" + (sizeof (mods) > 1 ? "s" : "") + "\n");
+#endif
+      forcibly_added[ mod+"#0" ] = 1;
+      enable_module( mod+"#0" );
+      forcibly_added[ mod+"#0" ] = 2;
+    }
+  }
+#ifdef MODULE_DEBUG
+  if( wr && enable_module_batch_msgs )
+    report_debug("] \b");
+#endif
+}
+
+#if ROXEN_COMPAT < 2.2
+// BEGIN SQL
+
+mapping(string:string) sql_urls = ([]);
+
+constant sql_cache_get = DBManager.sql_cache_get;
+
+Sql.Sql sql_connect(string db, void|string charset)
+{
+  if (sql_urls[db])
+    return sql_cache_get(sql_urls[db], 0, charset);
+  else
+    return sql_cache_get(db, 0, charset);
+}
+
+// END SQL
+#endif
+
+protected string my_url, my_host;
+
+void fix_my_url()
+{
+  my_url = query ("MyWorldLocation");
+  if (!sizeof (my_url) &&
+      !(my_url = Roxen.get_world (query ("URLs"))))
+    // Probably no port configured. The empty string is used as a
+    // flag; there shouldn't be any bad fallback here.
+    my_url = "";
+  else
+    if (!has_suffix (my_url, "/")) my_url += "/";
+
+  if (sscanf (my_url, "%*s://[%s]", string hostv6) == 2 ||
+      sscanf (my_url, "%*s://%[^:/]", string hostv4) == 2)
+    my_host = hostv6 ? "[" + hostv6 + "]" : hostv4;
+  else
+    my_host = 0;
+}
+
+//! Returns some URL for accessing the configuration. (Should be
+//! used instead of querying MyWorldLocation directly.)
+string get_url() {return my_url;}
+
+//! Returns the host part of the URL returned by @[get_url]. Returns
+//! zero when @[get_url] cannot return any useful value (i.e. it
+//! returns the empty string).
+string get_host() {return my_host;}
+
+array after_init_hooks = ({});
+mixed add_init_hook( mixed what )
+{
+  if( inited )
+    call_out( what, 0, this_object() );
+  else
+    after_init_hooks |= ({ what });
+}
+
+protected int got_no_delayed_load = 0;
+// 0 -> enable delayed loading, 1 -> disable delayed loading,
+// -1 -> don't change.
+
+void fix_no_delayed_load_flag()
+{
+  if( got_no_delayed_load >= 0 &&
+      query ("no_delayed_load") != got_no_delayed_load ) {
+    set( "no_delayed_load", got_no_delayed_load );
+    save_one( 0 );
+  }
+}
+
+void enable_all_modules()
+{
+  MODULE_LOCK (0);
+
+  // Temporarily shift out of the rxml parsing context if we're inside
+  // any (e.g. due to delayed loading from inside the admin
+  // interface).
+  RXML.Context old_ctx = RXML.get_context();
+  RXML.set_context (0);
+  mixed err = catch {
+
+      low_init( );
+      fix_no_delayed_load_flag();
+
+    };
+  RXML.set_context (old_ctx);
+  if (err) throw (err);
+}
+
+void low_init(void|int modules_already_enabled)
+{
+  if( inited )
+    return; // already done
+
+  int start_time = gethrtime();
+  if (!modules_already_enabled)
+    report_debug("\nEnabling all modules for "+query_name()+"... \n");
+
+  if (!modules_already_enabled)
+  {
+    // Ugly kludge: We let enabled_modules lie about the set of currently
+    //              enabled modules during the init, so that
+    //              module_dependencies() doesn't perform duplicate work.
+    enabled_modules = retrieve("EnabledModules", this_object());
+//     roxenloader.LowErrorContainer ec = roxenloader.LowErrorContainer();
+//     roxenloader.push_compile_error_handler( ec );
+
+    array modules_to_process = sort(indices( enabled_modules ));
+    string tmp_string;
+
+    mixed err;
+    forcibly_added = ([]);
+    enable_module_batch_msgs = 1;
+    foreach( modules_to_process, tmp_string )
+    {
+      if( !forcibly_added[ tmp_string ] )
+        if(err = catch( enable_module( tmp_string, UNDEFINED, UNDEFINED,
+                                       UNDEFINED, 1)))
+        {
+          report_error(LOC_M(45, "Failed to enable the module %s. Skipping.")
+                       +"\n%s\n", tmp_string, describe_backtrace(err));
+          got_no_delayed_load = -1;
+        }
+    }
+    enable_module_batch_msgs = 0;
+//      roxenloader.pop_compile_error_handler();
+    forcibly_added = ([]);
+  }
+
+#ifdef MODULE_HOT_RELOAD
+  array(string) hot_mods = roxen->query_hot_reload_modules();
+  array(string) hot_confs = roxen->query_hot_reload_modules_conf();
+#endif
+
+  foreach( ({this_object()})+indices( otomod ), RoxenModule mod ) {
+    if( mod->ready_to_receive_requests ) {
+      if( mixed q = catch( mod->ready_to_receive_requests( this_object() ) ) ) {
+        report_error( "While calling ready_to_receive_requests in "+
+                      otomod[mod]+":\n"+
+                      describe_backtrace( q ) );
+        got_no_delayed_load = -1;
+      }
+    }
+
+#ifdef MODULE_HOT_RELOAD
+    if (has_index(mod, "is_module") &&
+        (!hot_confs || has_value(hot_confs, name)))
+    {
+      sscanf (mod->module_local_id(), "%s#", string mod_name);
+
+      if (has_value(hot_mods, mod_name)) {
+        register_module_hot_reload(mod);
+      }
+    }
+#endif
+  }
+
+  foreach( after_init_hooks, function q )
+    if( mixed w = catch( q(this_object()) ) ) {
+      report_error( "While calling after_init_hook %O:\n%s",
+                    q,  describe_backtrace( w ) );
+      got_no_delayed_load = -1;
+    }
+
+  after_init_hooks = ({});
+
+  inited = 1;
+  if (!modules_already_enabled)
+    report_notice(LOC_S(4, "All modules for %s enabled in %3.1f seconds") +
+                  "\n\n", query_name(), (gethrtime()-start_time)/1000000.0);
+
+#ifdef SNMP_AGENT
+  // Start trap after real virt.serv. loading
+  if(query("snmp_process") && objectp(roxen->snmpagent))
+    roxen->snmpagent->vs_start_trap(get_config_id());
+#endif
+
+}
+
+DataCache datacache;
+
+// Handle changes in js logger endpoints
+void json_log_endpoint_cb(object v) {
+  if (!json_logger) return;
+
+  array new_endpoints = v->query();
+  array old_endpoints = json_logger->get_bound_ports();
+
+  multiset obsolete = (multiset)old_endpoints;
+
+  // Bind any new ports
+  foreach(new_endpoints, string ep) {
+    if (!ep || (ep == "")) continue;
+    ep = roxen_path(ep);
+    string json_log_dir = combine_path(getcwd(), roxen.query_configuration_dir(), "_jsonlog");
+    if (!Stdio.exist(json_log_dir)) {
+      mkdir(json_log_dir, 0700);
+    }
+    ep = replace(ep, "$JSONLOGDIR", json_log_dir);
+
+    if (!obsolete[ep]) {
+      json_logger->bind(ep);
+    }
+    obsolete[ep] = 0;
+  }
+
+  foreach((array)obsolete, string ep) {
+    if (!ep || (ep == "")) continue;
+    json_logger->unbind(ep);
+  }
+}
+
+protected void set_module_max_priority(Variable.Variable var)
+{
+  int new_max_priority = var->query();
+  foreach(sorted_modules, RoxenModule me) {
+    Variable.Variable pri = me->getvar("_priority");
+    if (!pri) continue;
+    pri->set_range(0, new_max_priority);
+  }
+}
+
+protected void create()
+{
+  if (!name) error ("Configuration name not set through bootstrap_info.\n");
+
+  json_logger = ConfigurationLogger(combine_path_unix("conf", name), ([ ]), UNDEFINED);
+
+//   int st = gethrtime();
+  roxen.add_permission( "Site:"+name, LOC_C(306,"Site")+": "+name );
+
+  // for now only these two. In the future there might be more variables.
+  defvar( "data_cache_size", 131072, DLOCALE(274, "Cache:Cache size"),
+          TYPE_INT| VAR_PUBLIC,
+          DLOCALE(275, "The size of the data cache used to speed up requests "
+                  "for commonly requested files, in KBytes"));
+
+  defvar( "data_cache_file_max_size", 256, DLOCALE(276, "Cache:Max file size"),
+          TYPE_INT | VAR_PUBLIC,
+          DLOCALE(277, "The maximum size of a file that is to be considered for "
+                  "the cache, in KBytes."));
+
+
+  defvar("default_server", 0, DLOCALE(20, "Ports: Default site"),
+         TYPE_FLAG| VAR_PUBLIC,
+         DLOCALE(21, "If true, this site will be selected in preference of "
+         "other sites when virtual hosting is used and no host "
+         "header is supplied, or the supplied host header does not "
+         "match the address of any of the other servers.") );
+
+  defvar("comment", "", DLOCALE(22, "Site comment"),
+         TYPE_TEXT_FIELD|VAR_MORE,
+         DLOCALE(23, "This text will be visible in the administration "
+                 "interface, it can be quite useful to use as a memory helper."));
+
+  defvar("name", "", DLOCALE(24, "Site name"),
+         TYPE_STRING|VAR_MORE| VAR_PUBLIC|VAR_NO_DEFAULT,
+         DLOCALE(25, "This is the name that will be used in the administration "
+         "interface. If this is left empty, the actual name of the "
+         "site will be used."));
+
+  defvar("compat_level", Variable.StringChoice (
+           "", roxen.compat_levels, VAR_NO_DEFAULT,
+           DLOCALE(246, "Compatibility level"),
+           DLOCALE(386, #"\
+<p>The compatibility level is used by different modules to select the
+right behavior to remain compatible with earlier Roxen versions. When
+a server configuration is created, this variable is set to the current
+version. After that it's never changed automatically, thereby ensuring
+that server configurations migrated from earlier Roxen versions is
+kept at the right compatibility level.</p>
+
+<p>This variable may be changed manually, but it's advisable to test
+the site carefully afterwards. A reload of the whole server
+configuration is required to propagate the change properly to all
+modules.</p>
+
+<p>Compatibility level notes:</p>
+
+<ul>
+  <li>2.4 also applies to the version commonly known as 3.2. That was
+  the release of Roxen CMS which contained Roxen WebServer 2.4.</li>
+
+  <li>2.5 corresponds to no released version. This compatibility level
+  is only used to turn on some optimizations that have compatibility
+  issues with 2.4, notably the optimization of cache static tags in
+  the &lt;cache&gt; tag.</li>
+
+  <li>There are no compatibility differences between 5.0 and 5.1, so
+  those two compatibility levels can be used interchangeably.</li>
+</ul>")));
+
+  set ("compat_level", roxen.roxen_ver);
+  // Note to developers: This setting can be accessed through
+  // id->conf->query("compat_level") or similar, but observe that that
+  // call is not entirely cheap. It's therefore advisable to put it in
+  // a local variable if the compatibility level is to be tested
+  // frequently. It's perfectly all right to do that in e.g. the
+  // module start function, since the documentation explicitly states
+  // that a reload of all modules is necessary to propagate a change
+  // of the setting.
+
+  defvar("max_priority",
+         Variable.IntChoice(9, ({ 9, 99, 999, 9999 }), 0,
+                            DLOCALE(1074, "Maximum priority"),
+                            DLOCALE(1075, "<p>The maximum priority value "
+                                    "for modules.</p>\n"
+                                    "<p>In most cases the default (9) "
+                                    "is fine, but in some configurations "
+                                    "there may be more than 10 modules "
+                                    "of the same type that would otherwise "
+                                    "conflict with each other.</p>\n"
+                                    "<p>Note that existing module priorities "
+                                    "will be scaled accordingly when this "
+                                    "value is changed.</p>")))->
+    set_changed_callback(set_module_max_priority);
+
+  defvar("Log", 1, DLOCALE(28, "Logging: Enabled"),
+         TYPE_FLAG, DLOCALE(29, "Log requests"));
+
+  defvar("LogFormat", #"\
+# The default format follows the Combined Log Format, a slight
+# extension of the Common Log Format - see
+# http://httpd.apache.org/docs/1.3/logs.html#combined
+*: $ip-number - $user [$cern-date] \"$method $full-resource $protocol\" $response $length \"$referrer\" \"$user-agent-raw\"
+
+# The following line is an extension of the above that adds useful
+# cache info. If you enable this you have to comment out or delete the
+# line above.
+#*: $ip-number - $user [$cern-date] \"$method $full-resource $protocol\" $response $length \"$referrer\" \"$user-agent-raw\" $cache-status $eval-status $request-time
+
+# You might want to enable some of the following lines to get logging
+# of various internal activities in the server. The formats below are
+# somewhat similar to the Common Log Format standard, but they might
+# still break external log analysis tools.
+
+# To log commits and similar filesystem changes in a sitebuilder file system.
+#sbfs/commit: 0.0.0.0 - - [$cern-date] \"$action $ac-userid:$workarea:$resource sbfs\" - - $commit-type
+#sbfs/*: 0.0.0.0 - - [$cern-date] \"$action $ac-userid:$workarea:$resource sbfs\" - -
+
+# Catch-all for internal log messages.
+#*/*: 0.0.0.0 - - [$cern-date] \"$action $resource $facility\" - -",
+         DLOCALE(26, "Logging: Format"),
+         TYPE_TEXT_FIELD|VAR_MORE,
+         // FIXME: Undocumented: $cs-uri-stem, $cs-uri-query,
+         // $real-resource, $real-full-resource, $real-cs-uri-stem,
+
+         /* Removed doc for would-be $request-vtime.
+<tr><td>$request-vtime</td>
+    <td>The virtual time the request took (seconds). This measures the
+    virtual time spent by the Roxen process. Note however that the
+    accuracy is comparably low on many OS:es, typically much lower
+    than $request-time. Also note that this isn't supported on all
+    platforms.</td></tr>
+         */
+
+         DLOCALE(27, #"\
+Describes the format to use for access logging. The log file can also
+receive messages for various internal activities.
+
+Empty lines and lines beginning with '<code>#</code>' are ignored.
+Other lines describes how to log either an access or an internal
+event.
+
+<p>A line to format an access logging message is one of:</p>
+
+<pre><i>&lt;response code&gt;</i>: <i>&lt;log format&gt;</i>
+*: <i>&lt;log format&gt;</i>
+</pre>
+
+<p><i>&lt;response code&gt;</i> is an HTTP status code. The
+corresponding <i>&lt;log format&gt;</i> is used for all responses
+matching that code. It's described in more detail below. If
+'<code>*</code>' is used instead of a response code then that line
+matches all responses that aren't matched by any specific response
+code line.</p>
+
+<p>A line to format an event logging message is one of:</p>
+
+<pre><i>&lt;facility&gt;</i>/<i>&lt;action&gt;</i>: <i>&lt;log format&gt;</i>
+<i>&lt;facility&gt;</i>/*: <i>&lt;log format&gt;</i>
+*/*: <i>&lt;log format&gt;</i>
+</pre>
+
+<p><i>&lt;facility&gt;</i> matches an identifier for the Roxen module
+or subsystem that the event comes from. Facility identifiers always
+start with a character in <code>[a-zA-Z0-9]</code> and contain only
+characters in <code>[-_.#a-zA-Z0-9]</code>. If '<code>*</code>' is
+used instead of <i>&lt;facility&gt;</i> then that line matches all
+facilities that aren't matched by any other line.</p>
+
+<p><i>&lt;action&gt;</i> matches an identifier for a specific kind of
+event logged by a facility. An action identifier contains only
+characters in <code>[-_.#a-zA-Z0-9]</code>. '<code>*</code>' may be
+used instead of an <i>&lt;action&gt;</i> to match all events logged by
+a facility that aren't matched by any other line.</p>
+
+<p><i>&lt;log format&gt;</i> consists of literal characters and the
+special specifiers described below. All specifiers are not applicable
+for all kinds of messages. If an unknown or inapplicable specifier is
+encountered it typically expands to '<code>-</code>', but in some
+cases it expands to a dummy value that is syntactically compatible
+with what it usually expands to.</p>
+
+<p>For compatibility, underscores ('_') may be used wherever
+hyphens ('-') occur in the specifier names.</p>
+
+<h3>Format specifiers for both access and event logging</h3>
+
+<table class='hilite-1stcol'><tbody valign='top'>
+<tr><td>\\n \\t \\r</td>
+    <td>Insert a newline, tab or linefeed character, respectively.</td></tr>
+<tr><td>$char(int)</td>
+    <td>Insert the (1 byte) character specified by the integer. E.g.
+    '<code>$char(36)</code>' inserts a literal '<code>$</code>'
+    character.</td></tr>
+<tr><td>$wchar(int)</td>
+    <td>Insert the specified integer using 2 bytes in network byte
+    order. Specify a negative integer to get the opposite (i.e. big
+    endian) order.</td></tr>
+<tr><td>$int(int)</td>
+    <td>Insert the specified integer using 4 bytes in network byte
+    order. Specify a negative integer to get the opposite (i.e. big
+    endian) order.</td></tr>
+<tr><td>$^</td>
+    <td>Suppress newline at the end of the logentry.</td></tr>
+<tr><td>$date</td>
+    <td>Local date formatted like '<code>2001-01-17</code>'.</td></tr>
+<tr><td>$time</td>
+    <td>Local time formatted like '<code>13:00:00</code>'.</td></tr>
+<tr><td>$timestamp</td>
+    <td>Local date and time formatted like '<code>20010117T130000</code>'.</td></tr>
+<tr><td>$cern-date</td>
+    <td>Local date and time in CERN Common Log file format, i.e.
+    like '<code>17/Jan/2001:13:00:00 +0200</code>'.</td></tr>
+<tr><td>$utc-date</td>
+    <td>UTC date formatted like '<code>2001-01-17</code>'.</td></tr>
+
+<tr><td>$utc-time</td>
+    <td>UTC time formatted like '<code>13:00:00</code>'.</td></tr>
+<tr><td>$utc-timestamp</td>
+    <td>UTC date and time formatted like '<code>20010117T130000</code>'.</td></tr>
+<tr><td>$bin-date</td>
+    <td>Unix time as a 32 bit integer in network byte order.</td></tr>
+<tr><td>$resource</td>
+    <td>Resource identifier. For events, this is either a path to a
+    file (if it begins with '<code>/</code>') or some other kind of
+    resource identifier (otherwise). It is '-' for events that don't
+    act on any specific resource.</td></tr>
+<tr><td>$server-uptime</td>
+    <td>Server uptime in seconds.</td></tr>
+<tr><td>$server-cputime</td>
+    <td>Server cpu (user+system) time in milliseconds.</td></tr>
+<tr><td>$server-usertime</td>
+    <td>Server cpu user time in milliseconds.</td></tr>
+<tr><td>$server-systime</td>
+    <td>Server cpu system time in milliseconds.</td></tr>
+</tbody></table>
+
+<h3>Format specifiers for access logging</h3>
+
+<table class='hilite-1stcol'><tbody valign='top'>
+<tr><td>$host</td>
+    <td>The remote host name, or ip number.</td></tr>
+<tr><td>$vhost</td>
+    <td>The Host request-header sent by the client, or '-' if none.</td></tr>
+<tr><td>$ip-number</td>
+    <td>The remote ip number.</td></tr>
+<tr><td>$bin-ip-number</td>
+    <td>The remote host ip as a binary integer number.</td></tr>
+<tr><td>$link-layer</td>
+    <td>The link layer protocol used for the request if known.</td></tr>
+<tr><td>$cipher-suite</td>
+    <td>The TLS/SSL cipher suite used for the request if applicable.</td></tr>
+<tr><td>$forwarded</td>
+    <td>The Forwarded (RFC 7239) headers or X-Forwarded-* headers
+        for the request, or '-' if none were provided.</td></tr>
+<tr><td>$xff</td>
+    <td>The remote host name/ip taken from the X-Forwarded-For header, or
+        '-' if none were provided. If multiple headers or multiple values are
+        given the first value is logged; this should correspond to the
+        originating computer.</td></tr>
+<tr><td>$method</td>
+    <td>Request method.</td></tr>
+<tr><td>$full-resource</td>
+    <td>Full requested resource, including any query fields.</td></tr>
+<tr><td>$protocol</td>
+    <td>The protocol used (normally HTTP/1.1).</td></tr>
+<tr><td>$scheme</td>
+    <td>The URL scheme (e.g. http or https) derived from the port handler
+        module.</td></tr>
+<tr><td>$response</td>
+    <td>The response code sent.</td></tr>
+<tr><td>$bin-response</td>
+    <td>The response code sent as a binary short number.</td></tr>
+<tr><td>$length</td>
+    <td>The length of the data section of the reply.</td></tr>
+<tr><td>$bin-length</td>
+    <td>Same, but as a 32 bit integer in network byte order.</td></tr>
+<tr><td>$request-length</td>
+    <td>The length of the header section of the request.</td></tr>
+<tr><td>$bin-request-length</td>
+    <td>Same, but as a 32 bit integer in network byte order.</td></tr>
+<tr><td>$request-data-length</td>
+    <td>The length of the data section of the request.</td></tr>
+<tr><td>$bin-request-data-length</td>
+    <td>Same, but as a 32 bit integer in network byte order.</td></tr>
+<tr><td>$queue-length</td>
+    <td>Number of jobs waiting to be processed by the handler threads
+    at the time this request was added to the queue.</td></tr>
+<tr><td>$queue-time</td>
+    <td>Time in seconds that the request spent in the internal handler
+    queue, waiting to be processed by a handler thread.</td></tr>
+<tr><td>$handle-time</td>
+    <td>Time in seconds spent processing the request in a handler
+    thread. This measures the server processing time, excluding I/O
+    and time spent in the handler queue. Note however that this
+    measures real time, not virtual process time. I.e. if there are
+    other handler threads or processes using the CPU then this might
+    not accurately show the time that the Roxen server spent on the
+    request. Also note that if a handler thread has to wait for
+    responses from other servers then that wait time is included in
+    this measurement.</td></tr>
+<tr><td>$handle-cputime</td>
+    <td>CPU time in seconds spent processing the request in a handler
+    thread. Similar to $handle-time, but only includes the actual CPU
+    time spent on this request only. Time spent waiting for responses
+    from external server is not included here. Note that this time
+    might have very low accuracy on some platforms. There are also
+    platforms where this measurement isn't available at all, and in
+    that case this fields expands to \"-\".</td></tr>
+<tr><td>$request-time</td>
+    <td>Time in seconds that the whole request took on the server
+    side, including I/O time for receiving the request and sending the
+    response. Note that this measures real time - see $handle-time for
+    further discussion.</td></tr>
+<tr><td>$protocol-time</td>
+    <td>Time in seconds that the protocol processing took on the server
+    side. This includes both the time spent parsing the request, and
+    the time spent preparing the result for sending.</td></tr>
+<tr><td>$etag</td>
+    <td>The entity tag (aka ETag) header of the result.</td></tr>
+<tr><td>$referrer</td>
+    <td>The header 'referer' from the request, or '-'.</td></tr>
+<tr><td>$referer</td>
+    <td>Same as $referrer. Common misspelling kept for
+    compatibility.</td></tr>
+<tr><td>$user-agent</td>
+    <td>The header 'User-Agent' from the request, or '-'.</td></tr>
+<tr><td>$user-agent-raw</td>
+    <td>Same, but spaces in the name are not encoded to %20.</td></tr>
+<tr><td>$user</td>
+    <td>The name of the user, if any is given using the HTTP basic
+    authentication method.</td></tr>
+<tr><td>$user-id</td>
+    <td>A unique user ID, if cookies are supported, by the client,
+    otherwise '0'.</td></tr>
+<tr><td>$content-type</td>
+    <td>Resource MIME type.</td></tr>
+<tr><td>$cookies</td>
+    <td>All cookies sent by the browser, separated by ';'.</td></tr>
+<tr><td>$set-cookies</td>
+    <td>All cookies set by the response, separated by ';'.</td></tr>
+
+<tr><td>$cache-status</td>
+    <td>A comma separated list of words (containing no whitespace)
+    that describes how the request got handled by various caches:
+
+    <table class='hilite-1stcol'><tbody valign='top'>
+    <tr><td>protcache</td>
+        <td>The page is served from the HTTP protocol cache.</td></tr>
+    <tr><td>protstore</td>
+        <td>The page is stored in the HTTP protocol cache.</td></tr>
+    <tr><td>stale</td>
+        <td>There is a stale entry in the HTTP protocol cache. A
+        refresh is underway in the background and the stale entry is
+        sent in the meantime to avoid a long response time and server
+        congestion.</td></tr>
+    <tr><td>refresh</td>
+        <td>This is the finishing of the background refresh request
+        for the entry in the HTTP protocol cache.</td></tr>
+    <tr><td>icachedraw</td>
+        <td>A server-generated image had to be rendered from scratch.</td></tr>
+    <tr><td>icacheram</td>
+        <td>A server-generated image was found in the RAM cache.</td></tr>
+    <tr><td>icachedisk</td>
+        <td>A server-generated image was found in the disk cache (i.e. in
+            the server's MySQL database).</td></tr>
+    <tr><td>pcoderam</td>
+        <td>A hit in the RXML p-code RAM cache.</td></tr>
+    <tr><td>pcodedisk</td>
+        <td>A hit in the RXML p-code persistent cache.</td></tr>
+    <tr><td>pcodestore</td>
+        <td>P-code is added to or updated in the persistent cache.</td></tr>
+    <tr><td>pcodestorefailed</td>
+        <td>An attempt to add or update p-code in the persistent cache
+        failed (e.g. due to a race with another request).</td></tr>
+    <tr><td>cachetag</td>
+        <td>RXML was evaluated without any cache miss in any RXML
+        &lt;cache&gt; tag. The &lt;nocache&gt; tag does not count as a
+        miss.</td></tr>
+    <tr><td>xsltcache</td>
+        <td>There is a hit XSLT cache.</td></tr>
+    <tr><td>nocache</td>
+        <td>No hit in any known cache, and not added to the HTTP
+        protocol cache.</td></tr>
+    </tbody></table></td></tr>
+
+<tr><td>$eval-status</td>
+    <td>A comma separated list of words (containing no whitespace)
+    that describes how the page has been evaluated:
+
+    <table class='hilite-1stcol'><tbody valign='top'>
+    <tr><td>bad-charset</td>
+        <td>Detected invalid charset in declared content-type.</td></tr>
+    <tr><td>xslt</td>
+        <td>XSL transform.</td></tr>
+    <tr><td>rxmlsrc</td>
+        <td>RXML evaluated from source.</td></tr>
+    <tr><td>rxmlpcode</td>
+        <td>RXML evaluated from compiled p-code.</td></tr>
+    </tbody></table></td></tr>
+
+<tr><td>$protcache-cost</td>
+    <td>The lookup depth in the HTTP protocol module low-level cache.</td></tr>
+</tbody></table>
+
+<h3>Event logging</h3>
+
+<p>The known event logging facilities and modules are described
+below.</p>
+
+<dl>
+<dt>Facility: roxen</dt>
+    <dd><p>This is logging for systems in the Roxen WebServer core.
+    For logging that is not related to any specific configuration, the
+    configuration for the Administration Interface is used.</p>
+
+    <p>The known events are:</p>
+
+    <table class='hilite-1stcol'><tbody valign='top'>
+    <tr><td>ram-cache-gc</td>
+        <td>Logged after the RAM cache GC has run. $handle-time and
+        $handle-cputime are set to the time the GC took (see
+        descriptions above for details).</td></tr>
+    <tr><td>ram-cache-rebase</td>
+        <td>Logged when the RAM cache has performed a rebias of the
+        priority queue values. Is a problem only if it starts to
+        happen too often.</td></tr>
+    </tbody></table></dd>
+
+<dt>Facility: sbfs</dt>
+    <dd><p>A SiteBuilder file system.</p>
+
+    <p>The actions <code>commit</code>, <code>purge</code>,
+    <code>mkdir</code>, <code>set-dir-md</code>, and
+    <code>rmdir</code> are logged for file system changes except those
+    in edit areas.</p>
+
+    <p>The action <code>crawl-file</code> is logged for files that are
+    crawled by the persistent cache crawler.</p>
+
+    <p>The actions <code>file-change</code> and
+    <code>dir-change-flat</code> are logged when external file and
+    directory changes are detected (and this feature is enabled).</p>
+
+    <p>These extra format specifiers are defined where applicable:</p>
+
+    <table class='hilite-1stcol'><tbody valign='top'>
+    <tr><td>$ac-userid</td>
+        <td>The ID number of the AC identity whose edit area was used.
+        Zero for the common view area.</td></tr>
+    <tr><td>$workarea</td>
+        <td>The unique tag for the work area. Empty for the main work
+        area.</td></tr>
+    <tr><td>$commit-type</td>
+        <td>The type of file commit, one of <code>create</code>,
+        <code>edit</code>, <code>delete</code>, and
+        <code>undelete</code>.</td></tr>
+    <tr><td>$revision</td>
+        <td>The committed revision number, a dotted decimal.</td></tr>
+    <tr><td>$comment</td>
+        <td>The commit message.</td></tr>
+    <tr><td>$request-time</td>
+        <td>This is set for the action <code>crawl-file</code>. It's
+        similar to <code>$request-time</code> for normal requests,
+        except that it measures the whole time it took for the
+        persistent cache crawler to process the page. That includes
+        all crawled variants and the saving of the entry to the
+        database.</td></tr>
+    </tbody></table></dd>
+</dl>"), 0, lambda(){ return !query("Log");});
+
+  // Make the widget above a bit larger.
+  getvar ("LogFormat")->rows = 20;
+  getvar ("LogFormat")->cols = 80;
+
+  // FIXME: Mention it is relative to getcwd(). Can not be localized in pike 7.0.
+  string log_suffix = ".%y-%m-%d";
+  if (name == "Administration Interface") log_suffix = ".%y-%m";
+  defvar("LogFile", "$LOGDIR/"+Roxen.short_name(name)+"/Log" + log_suffix,
+         DLOCALE(30, "Logging: Log file"), TYPE_FILE,
+         DLOCALE(31, "The log file. "
+         "A file name. Some substitutions will be done:"
+         "<pre>"
+         "%y    Year  (e.g. '1997')\n"
+         "%m    Month (e.g. '08')\n"
+         "%d    Date  (e.g. '10' for the tenth)\n"
+         "%h    Hour  (e.g. '00')\n"
+         "%H    Hostname\n"
+         "</pre>")
+         ,0, lambda(){ return !query("Log");});
+
+  string default_compressor = "";
+  foreach(({ "/bin/bzip2", "/usr/bin/bzip2", "/bin/gzip", "/usr/bin/gzip", }),
+          string bin) {
+    if (Stdio.is_file(bin)) {
+      default_compressor = bin;
+      break;
+    }
+  }
+  defvar("LogFileCompressor", default_compressor,
+         DLOCALE(258, "Logging: Compress log file"), TYPE_STRING,
+         DLOCALE(259, "Path to a program to compress log files, "
+                 "e.g. <tt>/usr/bin/bzip2</tt> or <tt>/usr/bin/gzip</tt>. "
+                 "<b>Note&nbsp;1:</b> The active log file is never compressed. "
+                 "Log rotation needs to be used using the \"Log file\" "
+                 "filename substitutions "
+                 "(e.g. <tt>$LOGDIR/mysite/Log.%y-%m-%d</tt>). "
+                 "<b>Note&nbsp;2:</b> Compression is limited to scanning files "
+                 "with filename substitutions within a fixed directory (e.g. "
+                 "<tt>$LOGDIR/mysite/Log.%y-%m-%d</tt>, "
+                 "not <tt>$LOGDIR/mysite/%y/Log.%m-%d</tt>)."),
+         0, lambda(){ return !query("Log");});
+
+  defvar("DaysToKeepLogFiles", 0,
+    DLOCALE(1150, "Logging: Number of days to keep log files"), TYPE_INT,
+    DLOCALE(1151, "Log files in the log directory older than specified number of "
+      "days will automatically be deleted. Set to <tt>0</tt> (<tt>zero</tt>) "
+      "to disable and keep log files forever. Currently active log file will "
+      "never be deleted, nor will files with names not matching the pattern "
+      "specified under <b>Log file</b>."))
+    ->set_range(0, Variable.no_limit);;
+
+  defvar("NoLog", ({ }),
+         DLOCALE(32, "Logging: No Logging for"), TYPE_STRING_LIST|VAR_MORE,
+         DLOCALE(33, "Don't log requests from hosts with an IP number which "
+                 "matches any of the patterns in this list. This also affects "
+                 "the access counter log."),
+         0, lambda(){ return !query("Log");});
+
+  defvar("JSONLogEndpoints", ({ "$JSONLOGDIR/" + Roxen.short_name(name) + ".jsonlog" }),
+         DLOCALE(1076, "Logging: JSON Logging endpoints"), TYPE_STRING_LIST,
+         DLOCALE(1077, "Socket paths and/or IP:ports to bind for log output from this configuration. "
+                 "$JSONLOGDIR will expand to &lt;configuration directory&gt;/_jsonlog where sockets should be reasonably secure."))
+    ->add_changed_callback(json_log_endpoint_cb);
+
+  defvar("Domain", roxen.get_domain(), DLOCALE(34, "Domain"),
+         TYPE_STRING|VAR_PUBLIC|VAR_NO_DEFAULT,
+         DLOCALE(35, "The domain name of the server. The domain name is used "
+         "to generate default URLs, and to generate email addresses."));
+
+  defvar("MyWorldLocation", "",
+         DLOCALE(36, "Ports: Primary Server URL"), TYPE_URL|VAR_PUBLIC,
+         DLOCALE(37, #"\
+This is the main server URL, where your start page is located. This
+setting is for instance used as fallback to generate absolute URLs to
+the server, but in most circumstances the URLs sent by the clients are
+used. A URL is deduced from the first entry in 'URLs' if this is left
+blank.
+
+<p>Note that setting this doesn't make the server accessible; you must
+also set 'URLs'."));
+
+  defvar("URLs",
+         Variable.PortList( ({"http://*/#ip=;nobind=0;"}), VAR_INITIAL|VAR_NO_DEFAULT,
+           DLOCALE(38, "Ports: URLs"),
+           DLOCALE(373, "Bind to these URLs. You can use '*' and '?' to perform"
+                   " globbing (using any of these will default to binding to "
+                   "all IP-numbers on your machine).  If you specify a IP# in "
+                   "the field it will take precedence over the hostname.")));
+
+  defvar("InternalLoc", internal_location,
+         DLOCALE(40, "Internal module resource mountpoint"),
+         TYPE_LOCATION|VAR_MORE,
+         DLOCALE(41, "Some modules may want to create links to internal "
+                 "resources. This setting configures an internally handled "
+                 "location that can be used for such purposes.  Simply select "
+                 "a location that you are not likely to use for regular "
+                 "resources."))
+    ->add_changed_callback(lambda(object v) { internal_location = v->query(); });
+
+  defvar("SubRequestLimit", sub_req_limit,
+         "Subrequest depth limit",
+         TYPE_INT | VAR_MORE,
+         "A limit for the number of nested sub requests for each request. "
+         "This is intented to catch unintended infinite loops when for "
+         "example inserting files in RXML. 0 for no limit." )
+    ->add_changed_callback(lambda(object v) { sub_req_limit = v->query(); });
+
+  // Throttling-related variables
+
+  defvar("throttle", 0,
+         DLOCALE(42, "Throttling: Server; Enabled"),TYPE_FLAG,
+         DLOCALE(43, "If set, per-server bandwidth throttling will be enabled. "
+                 "It will allow you to limit the total available bandwidth for "
+                "this site.<br />Bandwidth is assigned using a Token Bucket. "
+                "The principle under which it works is: for each byte we send we use a token. "
+                "Tokens are added to a repository at a constant rate. When there's not enough, "
+                "we can't transmit. When there's too many, they \"spill\" and are lost."));
+  //TODO: move this explanation somewhere on the website and just put a link.
+
+  defvar("throttle_fill_rate", 102400,
+         DLOCALE(44, "Throttling: Server; Average available bandwidth"),
+         TYPE_INT,
+         DLOCALE(45, "This is the average bandwidth available to this site in "
+                "bytes/sec (the bucket \"fill rate\")."),
+         0, arent_we_throttling_server);
+
+  defvar("throttle_bucket_depth", 1024000,
+         DLOCALE(46, "Throttling: Server; Bucket Depth"), TYPE_INT,
+         DLOCALE(47, "This is the maximum depth of the bucket. After a long enough period "
+                "of inactivity, a request will get this many unthrottled bytes of data, before "
+                "throttling kicks back in.<br>Set equal to the Fill Rate in order not to allow "
+                "any data bursts. This value determines the length of the time over which the "
+                "bandwidth is averaged."), 0, arent_we_throttling_server);
+
+  defvar("throttle_min_grant", 1300,
+         DLOCALE(48, "Throttling: Server; Minimum Grant"), TYPE_INT,
+         DLOCALE(49, "When the bandwidth availability is below this value, connections will "
+                "be delayed rather than granted minimal amounts of bandwidth. The purpose "
+                "is to avoid sending too small packets (which would increase the IP overhead)."),
+         0, arent_we_throttling_server);
+
+  defvar("throttle_max_grant", 14900,
+         DLOCALE(50, "Throttling: Server; Maximum Grant"), TYPE_INT,
+         DLOCALE(51, "This is the maximum number of bytes assigned in a single request "
+                "to a connection. Keeping this number low will share bandwidth more evenly "
+                "among the pending connections, but keeping it too low will increase IP "
+                "overhead and (marginally) CPU usage. You'll want to set it just a tiny "
+                "bit lower than any integer multiple of your network's MTU (typically 1500 "
+                "for ethernet)."), 0, arent_we_throttling_server);
+
+  defvar("req_throttle", 0,
+         DLOCALE(52, "Throttling: Request; Enabled"), TYPE_FLAG,
+         DLOCALE(53, "If set, per-request bandwidth throttling will be enabled.")
+         );
+
+  defvar("req_throttle_min", 1024,
+         DLOCALE(54, "Throttling: Request; Minimum guarranteed bandwidth"),
+         TYPE_INT,
+         DLOCALE(55, "The maximum bandwidth each connection (in bytes/sec) can use is determined "
+                "combining a number of modules. But doing so can lead to too small "
+                "or even negative bandwidths for particularly unlucky requests. This variable "
+                "guarantees a minimum bandwidth for each request."),
+         0, arent_we_throttling_request);
+
+  defvar("req_throttle_depth_mult", 60.0,
+         DLOCALE(56, "Throttling: Request; Bucket Depth Multiplier"),
+         TYPE_FLOAT,
+         DLOCALE(57, "The average bandwidth available for each request will be determined by "
+                "the modules combination. The bucket depth will be determined multiplying "
+                "the rate by this factor."),
+         0, arent_we_throttling_request);
+
+
+  defvar("404-files", ({ "404.inc" }),
+         DLOCALE(307, "No such file message override files"),
+         TYPE_STRING_LIST|VAR_PUBLIC,
+         DLOCALE(308,
+                 "If no file match a given resource all directories above the"
+                 " wanted file is searched for one of the files in this list."
+                 "<p>\n"
+                 "As an example, if the file /foo/bar/not_there.html is "
+                 "wanted, and this list contains the default value of 404.inc,"
+                 " these files will be searched for, in this order:</p><br /> "
+                 " /foo/bar/404.inc, /foo/404.inc and /404.inc."
+                 "<p>\n"
+                 "The inclusion file can access the form variables "
+                 "form.orig-file and form.orig-url to identify the original "
+                 "page that was requested.") );
+
+  defvar("401-files", ({ }),
+         DLOCALE(411, "Authentication failed message override files"),
+         TYPE_STRING_LIST|VAR_PUBLIC,
+         DLOCALE(412,
+                 "With each authentication required response this file is "
+                 "sent and displayed if the authentication fails or the user "
+                 "choose not to authenticate at all.<p>\n"
+                 "The file is searched for in parent directories in the same "
+                 "manner as the no such file message override files.") );
+
+  defvar("license",
+         License.
+         LicenseVariable(getenv("ROXEN_LICENSEDIR") || "../license/",
+                         VAR_NO_DEFAULT, DLOCALE(39, "License file"),
+                         DLOCALE(336, "The license file for this configuration."),
+                         this_object()));
+
+#ifdef HTTP_COMPRESSION
+  defvar("http_compression_enabled", 1,
+         DLOCALE(1000, "Compression: Enable HTTP compression"),
+         TYPE_FLAG,
+         DLOCALE(1001,
+#"Whether to enable HTTP protocol compression. Many types of text
+content (HTML, CSS, JavaScript etc.) can be compressed quite a lot, so
+enabling HTTP compression may improve the visitors' perception of the
+site's performance. It's however a trade-off between server processing
+power and bandwidth. Requests that end up in the protocol cache will
+be served in the compressed form directly from the protocol cache, so
+for such requests the processing power overhead can be held relatively
+low."))->add_changed_callback(lambda(object v)
+                              { http_compr_enabled = v->query(); });
+  http_compr_enabled = query("http_compression_enabled");
+
+  void set_mimetypes(array(string) mimetypes)
+  {
+    array main_mimes = ({});
+    array exact_mimes = ({});
+
+    foreach(mimetypes, string m) {
+      if(has_suffix(m, "/*"))
+        main_mimes += ({ m[..sizeof(m)-3] });
+      else if(!has_value(m, "*"))
+        exact_mimes += ({ m });
+    }
+
+    http_compr_exact_mimes = mkmapping(exact_mimes,
+                                       ({ 1 }) * sizeof(exact_mimes));
+    http_compr_main_mimes = mkmapping(main_mimes,
+                                      ({ 1 }) * sizeof(main_mimes));
+  };
+  defvar("http_compression_mimetypes",
+         ({ "text/*",
+            "application/javascript",
+            "application/x-javascript",
+            "application/json",
+            "application/xhtml+xml",
+            "image/x-icon",
+            "image/svg+xml" }),
+         DLOCALE(1002, "Compression: Enabled MIME-types"),
+         TYPE_STRING_LIST,
+         DLOCALE(1003, "The MIME types for which to enable compression. The "
+                 "forms \"maintype/*\" and \"maintype/subtype\" are allowed, "
+                 "but globbing on the general form (such as "
+                 "\"maintype/*subtype\" or \"maintype/sub*\") is not allowed "
+                 "and such globs will be silently ignored."))
+    ->add_changed_callback(lambda(object v)
+                           { set_mimetypes(v->query());
+                           });
+  set_mimetypes(query("http_compression_mimetypes"));
+
+  defvar("http_compression_min_size", 1024,
+         DLOCALE(1004, "Compression: Minimum content size"),
+         TYPE_INT,
+         DLOCALE(1005, "The minimum file size for which to enable compression. "
+                 "(It might not be worth it to compress a request if it can "
+                 "fit into a single TCP/IP packet anyways.)"))
+    ->add_changed_callback(lambda(object v)
+                           { http_compr_minlen = v->query(); });
+  http_compr_minlen = query("http_compression_min_size");
+
+  defvar("http_compression_max_size", 1048576,
+         DLOCALE(1006, "Compression: Maximum content size"),
+         TYPE_INT,
+         DLOCALE(1007, "The maximum file size for which to enable compression. "
+                 "Note that the general protocol cache entry size limit "
+                 "applies, so if the compression of dynamic requests is "
+                 "disabled, files larger than the protocol cache maximum "
+                 "file size setting will never be served compressed "
+                 "regardless of this setting."))
+    ->add_changed_callback(lambda(object v)
+                           { http_compr_maxlen = v->query(); });
+  http_compr_maxlen = query("http_compression_max_size");
+
+  Variable.Int comp_level =
+    Variable.Int(1, 0, DLOCALE(1008, "Compression: Compression level"),
+                 DLOCALE(1009, "The compression level to use (integer between 1 "
+                         "and 9). Higher number means more compression at the"
+                         " cost of processing power and vice versa. You may "
+                         "need to restart the server for this setting to "
+                         "take effect."));
+  comp_level->set_range(1, 9);
+  defvar("http_compression_level", comp_level);
+
+  defvar("http_compression_dynamic_reqs", 1,
+         DLOCALE(1010, "Compression: Compress dynamic requests"),
+         TYPE_FLAG,
+         DLOCALE(1011, "If enabled, even requests that aren't cacheable in the "
+                 "protocol cache will be compressed. If the site has many "
+                 "lightweight requests that are not protocol cacheable, the "
+                 "processing overhead may become relatively large with this "
+                 "setting turned on."))
+    ->add_changed_callback(lambda(object v)
+                           { http_compr_dynamic_reqs = v->query(); });
+  http_compr_dynamic_reqs = query("http_compression_dynamic_reqs");
+#endif
+
+
+  class NoSuchFileOverride
+  {
+    // compatibility with old config-files.
+    inherit Variable.Variable;
+
+    int check_visibility( RequestID id, int more_mode,
+                          int expert_mode, int devel_mode,
+                          int initial, int|void variable_in_cfif )
+    {
+      return 0;
+    }
+
+    void set( string newval )
+    {
+      if( search(newval,"emit source=values") == -1 )
+        variables[ "404-message" ]->set( newval );
+    }
+
+    void create()
+    {
+      ::create(
+#"<nooutput><emit source=values scope=ef variable='modvar.site.404-files'>
+   <if not='' variable='ef.value is '>
+     <set variable='var.base' value=''/>
+     <catch>
+       <emit source='path'>
+         <if not='' exists='/&_.name;'><throw/></if><!-- Break the loop. -->
+         <append variable='var.base' value='/&_.name;'/>
+         <set variable='var.404' value='&var.base;/&ef.value;'/>
+         <if exists='&var.404;'>
+           <set variable='var.errfile' from='var.404'/>
+         </if>
+       </emit>
+     </catch>
+   </if>
+</emit>
+</nooutput><if variable='var.errfile'><eval><insert file='&var.errfile;?orig-url=&page.url:url;&amp;orig-file=&page.virtfile:url;'/></eval></if><else><eval>&modvar.site.404-message:none;</eval></else>", 0, 0, 0 );
+    }
+  };
+
+  defvar("ZNoSuchFile", NoSuchFileOverride() );
+
+  defvar("404-message", #"<!DOCTYPE html>
+<html>
+  <head>
+    <title>404 - Page Not Found</title>
+    <meta name='viewport' content='width=device-width, initial-scale=1'>
+    <style>
+      body {
+        background:  #f2f1eb;
+        color:       #000;
+        margin:      0 0 49px;
+        padding:     30px 30px 0;
+        font-family: Verdana, Helvetica, Arial, sans-serif;
+        font-size:   12px;
+        line-height: 160%;
+      }
+      html        { position: relative; min-height: 100%; }
+      a           { color: #2331d1; }
+      .number     { float: left; margin-right: 30px; }
+      .header     { display: block; margin: 34px 0 30px; max-width: 100%; height: auto; }
+      .main       { float: left; width: 387px; max-width: 100%; }
+      .url        { display: block; font-family: Georgia, Times, serif; font-size: 18px; font-weight: normal; margin: 6px 0 20px; }
+      .separator  { color: #ffbe00; }
+      .footer     { position: absolute; bottom: 0; height: 49px; }
+      .footer img { vertical-align: middle; margin-right: 3px; }
+      .info       { font-size: 10px; color: #999; }
+    </style>
+  </head>
+  <body>
+    <img src='/internal-roxen-404' class='number' alt='404' width='142' height='57'/>
+    <div class='main'>
+      <img src='/internal-roxen-page-not-found-2' class='header' alt='Page Not Found' width='356' height='23'/>
+      <p>Unable to retrieve <b class='url'>&page.virtfile;</b></p>
+      <p>If you feel this is a configuration error, please contact
+         the administrators of this server or the author of the
+         <if referrer=''><a href='&client.referrer;'>referring page</a>.</if>
+         <else>referring page.</else>
+      </p>
+      <div class='footer'>
+        <img src='/internal-roxen-roxen-mini' width='19' height='17'/>
+        <span class='info'>
+          <strong>&roxen.product-name;</strong> <span class='separator'>|</span>
+          version &roxen.dist-version;
+        </span>
+      </div>
+    </div>
+    <br clear='all'/>
+  </body>
+</html>
+",
+         DLOCALE(58, "No such file message"),
+         TYPE_TEXT_FIELD|VAR_PUBLIC,
+         DLOCALE(59, "What to return when there is no resource or file "
+                 "available at a certain location."));
+
+
+  class AuthFailedOverride
+  {
+    // compatibility with old config-files.
+    inherit Variable.Variable;
+
+    int check_visibility( RequestID id, int more_mode,
+                          int expert_mode, int devel_mode,
+                          int initial, int|void variable_in_cfif )
+    {
+      return 0;
+    }
+
+    void set( string newval )
+    {
+      if( search(newval,"emit source=values") == -1 )
+        variables[ "401-message" ]->set( newval );
+    }
+
+    void create()
+    {
+      ::create(
+#"<nooutput><emit source=values scope=ef variable='modvar.site.401-files'>
+   <if not='' variable='ef.value is '>
+     <set variable='var.base' value=''/>
+     <catch>
+       <emit source='path'>
+         <if not='' exists='/&_.name;'><throw/></if><!-- Break the loop. -->
+         <append variable='var.base' value='/&_.name;'/>
+         <set variable='var.401' value='&var.base;/&ef.value;'/>
+         <if exists='&var.401;'>
+           <set variable='var.errfile' from='var.401'/>
+         </if>
+       </emit>
+     </catch>
+   </if>
+</emit>
+</nooutput><if variable='var.errfile'><eval><insert file='&var.errfile;?orig-url=&page.url:url;&amp;orig-file=&page.virtfile:url;'/></eval></if><else><eval>&modvar.site.401-message:none;</eval></else>", 0, 0, 0 );
+    }
+  };
+
+  defvar("ZAuthFailed", AuthFailedOverride() );
+
+  defvar("401-message", #"<!DOCTYPE html>
+<html>
+  <head>
+    <title>401 - Authentication Failed</title>
+    <meta name='viewport' content='width=device-width, initial-scale=1'>
+    <style>
+      body {
+        background:  #f2f1eb;
+        color:       #000;
+        margin:      0 0 49px;
+        padding:     30px 30px 0;
+        font-family: Verdana, Helvetica, Arial, sans-serif;
+        font-size:   12px;
+        line-height: 160%;
+      }
+      html        { position: relative; min-height: 100%; }
+      a           { color: #2331d1; }
+      .number     { float: left; margin-right: 30px; }
+      .header     { display: block; margin: 34px 0 30px; max-width: 100%; height: auto; }
+      .main       { float: left; width: 387px; max-width: 100%; }
+      .url        { display: block; font-family: Georgia, Times, serif; font-size: 18px; font-weight: normal; margin: 6px 0 20px; }
+      .separator  { color: #ffbe00; }
+      .footer     { position: absolute; bottom: 0; height: 49px; }
+      .footer img { vertical-align: middle; margin-right: 3px; }
+      .info       { font-size: 10px; color: #999; }
+    </style>
+  </head>
+  <body>
+    <img src='/internal-roxen-401' class='number' alt='401' width='142' height='57'/>
+    <div class='main'>
+      <img src='/internal-roxen-authentication-failed' class='header' alt='Authentication Failed' width='387' height='23'/>
+      <p>Unable to retrieve <b class='url'>&page.virtfile;</b></p>
+      <p>If you feel this is a configuration error, please contact
+         the administrators of this server or the author of the
+         <if referrer=''><a href='&client.referrer;'>referring page</a>.</if>
+         <else>referring page.</else>
+      </p>
+      <div class='footer'>
+        <img src='/internal-roxen-roxen-mini' width='19' height='17'/>
+        <span class='info'>
+          <strong>&roxen.product-name;</strong> <span class='separator'>|</span>
+          version &roxen.dist-version;
+        </span>
+      </div>
+    </div>
+    <br clear='all'/>
+  </body>
+</html>
+",
+         DLOCALE(413, "Authentication failed message"),
+         TYPE_TEXT_FIELD|VAR_PUBLIC,
+         DLOCALE(420, "What to return when an authentication attempt failed."));
+
+  if (!retrieve ("EnabledModules", this)["config_filesystem#0"]) {
+    // Do not use a handler queue timeout of the administration
+    // interface. You most probably don't want to get a 503 in your
+    // face when you're trying to reconfigure an overloaded server...
+    defvar("503-message", #"<!DOCTYPE html>
+<html>
+  <head>
+    <title>503 - Server Too Busy</title>
+    <meta name='viewport' content='width=device-width, initial-scale=1'>
+    <style>
+      body {
+        background:  #f2f1eb;
+        color:       #000;
+        margin:      0 0 49px;
+        padding:     30px 30px 0;
+        font-family: Verdana, Helvetica, Arial, sans-serif;
+        font-size:   12px;
+        line-height: 160%;
+      }
+      html        { position: relative; min-height: 100%; }
+      .header     { font-size: 20px }
+      .main       { width: 387px; max-width: 100%; }
+      .url        { display: block; font-family: Georgia, Times, serif; font-size: 18px; font-weight: normal; margin: 6px 0 20px; }
+      .separator  { color: #ffbe00; }
+      .footer     { position: absolute; bottom: 0; height: 49px; }
+      .info       { font-size: 10px; color: #999; }
+    </style>
+  </head>
+  <body>
+    <div class='main'>
+      <div class='header'>503 &mdash; Server Too Busy</div>
+      <p>Unable to retrieve <b class='url'>&page.virtfile;</b></p>
+      <p>The server is currently too busy to serve your request.
+         Please try again in a few moments.
+      </p>
+      <div class='footer'>
+        <span class='info'>
+          <strong>&roxen.product-name;</strong> <span class='separator'>|</span>
+          version &roxen.dist-version;
+        </span>
+      </div>
+    </div>
+    <br clear='all'/>
+  </body>
+</html>
+",
+           DLOCALE(1048, "Server too busy message"),
+           TYPE_TEXT_FIELD|VAR_PUBLIC,
+           DLOCALE(1049, "What to return if the server is too busy. See also "
+                   "\"Handler queue timeout\"."));
+
+    defvar("handler_queue_timeout", 30,
+           DLOCALE(1050, "Handler queue timeout"),
+           TYPE_INT,
+           DLOCALE(1051, #"Requests that have been waiting this many seconds on
+the handler queue will not be processed. Instead, a 503 error code and the
+\"Server too busy message\" will be returned to the client. This may help the
+server to cut down the queue length after spikes of heavy load."))
+      ->add_changed_callback(lambda(object v)
+                             { handler_queue_timeout = v->query(); });
+    handler_queue_timeout = query("handler_queue_timeout");
+  }
+
+#ifdef SNMP_AGENT
+  // SNMP stuffs
+  defvar("snmp_process", 0,
+         "SNMP: Enabled",TYPE_FLAG,
+         "If set, per-server objects will be added to the SNMP agent database.",
+          0, snmp_global_disabled);
+  defvar("snmp_community", "public:ro",
+         "SNMP: Community string", TYPE_STRING,
+         "The community string and access level for manipulation on server "
+                " specific objects.",
+         0, snmp_disabled);
+  defvar("snmp_traphosts", ({ }),
+                 "SNMP: Trap host URLs", TYPE_STRING_LIST,
+         "The remote nodes, where should be sent traps."
+         "<p>\n"
+         "The URL syntax is: snmptrap://community@hostname:portnumber"
+         "</p><br/>",
+         0, snmp_disabled);
+#endif
+
+  definvisvar( "no_delayed_load", 0, TYPE_FLAG|VAR_PUBLIC );
+
+//   report_debug("[defvar: %.1fms] ", (gethrtime()-st)/1000.0 );
+//   st = gethrtime();
+
+  mapping(string:mixed) retrieved_vars = retrieve("spider#0", this_object());
+  if (sizeof (retrieved_vars) && !retrieved_vars->compat_level)
+    // Upgrading an older configuration; default to 2.1 compatibility level.
+    set ("compat_level", "2.1");
+  setvars( retrieved_vars );
+
+//   report_debug("[restore: %.1fms] ", (gethrtime()-st)/1000.0 );
+
+#ifdef SNMP_AGENT
+  if (query("snmp_process")) {
+    if(objectp(roxen()->snmpagent)) {
+      int servid;
+      servid = roxen()->snmpagent->add_virtserv(get_config_id());
+      // todo: make invisible varibale and set it to this value for future reference
+      // (support for per-reload persistence of server index?)
+    } else
+      report_error("SNMPagent: something gets wrong! The main agent is disabled!\n");
+  }
+#endif
+}
+
+protected int arent_we_throttling_server () {
+  return !query("throttle");
+}
+protected int arent_we_throttling_request() {
+  return !query("req_throttle");
+}
+
+#ifdef SNMP_AGENT
+private int(0..1) snmp_disabled() {
+  return (!snmp_global_disabled() && !query("snmp_process"));
+}
+private int(0..1) snmp_global_disabled() {
+  return (!objectp(roxen->snmpagent));
+}
+#endif

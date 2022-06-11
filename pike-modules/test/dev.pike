@@ -1,8 +1,10 @@
+// NOTE: This is not a Pest test file
+
 import AST.Token;
 import AST.Lexer;
 
 int main() {
-  object file = Stdio.File("test/test-sources/huge.pike");
+  object file = Stdio.File(__DIR__ "/test-sources/huge.pike");
   array(Token) toks = ({});
 
   mixed res = gauge {
