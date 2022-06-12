@@ -862,8 +862,10 @@ class Lexer {
 
       case "#": {
         string next = peek_source();
+        // FIXME: There are more valid multiline string delimiters than " I
+        //        think. Verify that stuff.
         if (next == "\"") {
-          TODO("Lex multiline string\n");
+          return lex_multiline_string();
         }
 
         return lex_preprocessor_directive();
@@ -904,8 +906,10 @@ class Lexer {
       case "__weak__": return make_simple_token(.Token.WEAK);
     }
 
+    // FIXME: According to the Pike lexer `__UPCASE__` symbols are okay to
+    //        define by the user. It's lowercase ones that are reserved from
+    //        what I now understand.
     if (has_suffix(word, "__")) {
-      // FIXME: Create a mean to WARN
       // SYNTAX_ERROR(
       //   "Symbols with leading and tailing double underscores are reserved\n"
       // );
@@ -1020,6 +1024,28 @@ class Lexer {
     current = v[1..];
 
     return make_simple_token(.Token.BLOCK_COMMENT);
+  }
+
+  // FIXME: Escape sequences
+  private .Token.Token lex_multiline_string() {
+    int pos = cursor;
+    String.Buffer buf = String.Buffer();
+    function add = buf->add;
+    // Eat the current "
+    string prev = consume();
+
+    while (string s = consume(1)) {
+      if (s == "\"" && prev != "\\") {
+        break;
+      }
+
+      add(s);
+      prev = s;
+    }
+
+    current = buf->get();
+
+    return make_simple_token(.Token.STRING);
   }
 
   // FIXME: Escape sequences

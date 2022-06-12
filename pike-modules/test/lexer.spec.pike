@@ -926,12 +926,36 @@ describe("Strings", lambda () {
   });
 
   test("It should lex a multiline string", lambda () {
-    Token tok = Lexer(#"#\"
+    Lexer l = Lexer(#"#\"
       multiline string
       goes here
-    \"")->lex();
+    \";
+    int post_string = 12;
+    ");
 
-    werror("Multiline string token: %O\n", tok);
+    Token tok = l->lex();
+    expect(tok->type)->to_equal(STRING);
+    expect(tok->value)->to_equal(#"
+      multiline string
+      goes here
+    ");
+    expect((mapping)tok->location->start)->to_equal(([
+      "byte": 0,
+      "column": 1,
+      "line": 1,
+    ]));
+    expect((mapping)tok->location->end)->to_equal(([
+      "byte": 47,
+      "column": 6,
+      "line": 4,
+    ]));
+
+    tok = l->lex();
+    expect(tok->type)->to_equal(SEMICOLON);
+    expect(tok->value)->to_equal(";");
+    expect(tok->location->start->byte)->to_equal(47);
+    expect(tok->location->start->column)->to_equal(6);
+    expect(tok->location->start->line)->to_equal(4);
   });
 });
 
