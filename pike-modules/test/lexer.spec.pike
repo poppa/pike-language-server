@@ -890,8 +890,8 @@ describe("Strings", lambda () {
 
   test("It should throw on unterminated string literal", lambda () {
     string expmsg =
-      "Unterminated string literal\n" +
-      "    at byte range 0..15, column 1..17 on line 1\n";
+      "Unterminated string literal\n"
+      "    at byte range 0..15, column 1..16 on line 1\n";
     expect(lambda() { Lexer("\"Unte\\\"rminated")->lex(); })->to_throw(expmsg);
   });
 
@@ -1228,6 +1228,7 @@ describe("Numbers", lambda () {
     ]));
   });
 });
+
 
 /*******************************************************************************
 

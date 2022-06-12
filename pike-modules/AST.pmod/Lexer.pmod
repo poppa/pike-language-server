@@ -57,19 +57,41 @@ public enum State {
 }
 
 protected class BaseLexer {
-  protected Stdio.File source;
+  protected string source;
+  protected int length;
   protected int line = 1;
   protected int column = 0;
-  protected string current;
+  protected int cursor = 0;
+  protected string current_string;
+  protected int char;
+  protected string _filename;
   protected .Token.Position position_start;
   protected State lex_state = LEX_STATE_DEFAULT;
 
-  protected void create(Stdio.File | string source) {
-    if (stringp(source)) {
-      source = Stdio.FakeFile(source);
+  protected void create(string source, string filename) {
+    if (has_prefix(source, "\357\273\277")) {
+      TRACE("Convert input to internal string\n");
+      source = utf8_to_string(source);
     }
 
-    this::source = source;
+    this::length = sizeof(source);
+    // Add sentinels so we can't peek beyond the end
+    this::source = source + "\0\0\0";
+    this::_filename = filename;
+  }
+
+  protected variant void create(string source) {
+    create(source, "stdin");
+  }
+
+  protected variant void create(Stdio.File source, string filename) {
+    create(source->read(), filename);
+  }
+
+  protected variant void create(Stdio.File source) {
+    string o = sprintf("%O", source);
+    sscanf(o, "%*s\"%s\"", string filename);
+    create(source, filename);
   }
 
   public .Token.Token lex();
@@ -99,39 +121,37 @@ protected class BaseLexer {
     return msg;
   }
 
-  //! Returns the input source. If the input source was a file on disk the
+  //! Returns the input filename. If the input source was a file on disk the
   //! the path is returns, else @code{stdin@} is returned.
-  public string `input_source() {
-    if (object_program(source) == Stdio.FakeFile) {
-      return "stdin";
-    } else {
-      string o = sprintf("%O", source);
-      sscanf(o, "%*s\"%s\"", string filename);
-      return filename ? filename : "stdin";
-    }
+  public string `filename() {
+    return _filename;
   }
 
-  //! Creates a token with @[current] as value, @[position_start] as start
-  //! location and the current position as end location.
-  public .Token.Token make_simple_token(.Token.Type type) {
+  //! Creates a token with @[current_string] as value, @[position_start] as
+  //! start location and the current position as end location.
+  protected .Token.Token make_simple_token(.Token.Type type) {
     ADD_CALL_COUNT();
 
-    if (!current) {
-      return UNDEFINED;
+    if (!current_string && char) {
+      current_string = sprintf("%c", char);
     }
 
     .Token.Position end = .Token.Position(at_byte + 1, line, column + 1);
-    .Token.Location loc = .Token.Location(input_source, position_start, end);
+    .Token.Location loc = .Token.Location(_filename, position_start, end);
 
-    return .Token.Token(type, loc, current, lex_state);
+    return .Token.Token(type, loc, current_string, lex_state);
   }
 
-  protected inline int `cursor() {
-    return source->tell();
+  protected variant .Token.Token make_simple_token(
+    string value,
+    .Token.Type type
+  ) {
+    current_string = value;
+    return make_simple_token(type);
   }
 
   protected int `at_byte() {
-    int p = source->tell();
+    int p = cursor;
     // If p == 0 no byte has been read yet
     return p > 0 ? p - 1 : p;
   }
@@ -145,78 +165,55 @@ protected class BaseLexer {
       TRACE("### reset lex state from unquoted to default\n");
       lex_state = LEX_STATE_DEFAULT;
     } else if (lex_state == LEX_STATE_PREPROC_DEFINE) {
-      string prev = skip_behind(2);
+      int prev = look_behind(2);
 
-      if (prev != "\\") {
+      if (prev != '\\') {
         TRACE("### reset lex state from define to default\n");
         lex_state = LEX_STATE_DEFAULT;
       }
     }
   }
 
-  protected string consume(int n) {
+  protected int consume() {
     ADD_CALL_COUNT();
-    string value = source->read(n);
-    column += sizeof(value);
 
-    if (value == "") {
+    if (cursor >= length) {
+      return UNDEFINED;
+      error("Trying to read beyond input end\n");
+    }
+
+    int value = source[cursor];
+    column += 1;
+    cursor += 1;
+
+    if (value == '\0') {
       return UNDEFINED;
     }
 
-    if (has_value(value, "\n")) {
+    if (value == '\n') {
       maybe_reset_lex_state();
-      array lines = value / "\n";
-      int len = sizeof(lines);
-      line += len - 1;
-
-      if (len > 1) {
-        column = strlen(lines[-1]);
-      } else {
-        TODO("Should we end up here?\n");
-      }
+      inc_line();
     }
 
     return value;
   }
 
-  protected variant string consume() {
-    return consume(1);
+  protected int advance() {
+    return char = consume();
   }
 
-  protected string move(int n) {
+  protected int read_non_ws() {
     ADD_CALL_COUNT();
-    consume(n);
-    source->seek(-1, Stdio.SEEK_CUR);
-    return current = source->read(1);
-  }
+    int prev_col = column;
+    int prev_line = line;
+    int value = consume();
 
-  protected variant string move() {
-    return move(1);
-  }
-
-  protected string advance(int n) {
-    ADD_CALL_COUNT();
-    return current = consume(n);
-  }
-
-  protected variant string advance() {
-    return current = consume(1);
-  }
-
-  protected string read_non_ws() {
-    ADD_CALL_COUNT();
-    string value = source->read(1);
-
-    if (value == "") {
+    if ((<'\n', '\t', '\v', ' '>)[value]) {
+      cursor -= 1;
+      column = prev_col;
+      line = prev_line;
       return UNDEFINED;
     }
-
-    if ((<"\n", "\t", "\v", " ">)[value]) {
-      source->seek(-1, Stdio.SEEK_CUR);
-      return UNDEFINED;
-    }
-
-    column += 1;
 
     return value;
   }
@@ -224,7 +221,7 @@ protected class BaseLexer {
   protected void simple_put_back() {
     ADD_CALL_COUNT();
     column -= 1;
-    source->seek(-1, Stdio.SEEK_CUR);
+    cursor -= 1;
   }
 
   protected void inc_line() {
@@ -234,105 +231,53 @@ protected class BaseLexer {
   }
 
   protected void eat_whitespace() {
-    while ((< " ", "\t", "\v" >)[current]) {
+    while ((< ' ', '\t', '\v' >)[char]) {
       advance();
     }
   }
 
   protected void eat_whitespace_and_newline() {
-    while ((< " ", "\t", "\v", "\n" >)[current]) {
-      if (current == "\n") {
-        maybe_reset_lex_state();
-      }
+    while ((< ' ', '\t', '\v', '\n' >)[char]) {
       advance();
     }
   }
 
-  protected string skip_behind(int n) {
+  protected int look_behind(int n) {
     ADD_CALL_COUNT();
-    int pos = source->tell();
-    source->seek(-n, Stdio.SEEK_CUR);
-
-    string v = source->read(1);
-    source->seek(pos, Stdio.SEEK_SET);
-
-    return v;
+    return source[cursor - n];
   }
 
-  protected string look_back_source(int n) {
+  protected int peek_source() {
     ADD_CALL_COUNT();
-    int pos = source->tell();
-    source->seek(-n, Stdio.SEEK_CUR);
-    string v = source->read(n);
 
-    ASSERT_DEBUG(source->tell() == pos, "Wrong position after lookback");
+    // May look peculiar, but we move ahead one pos in consume()
+    int data = source[cursor];
 
-    if (v == "") {
-      return UNDEFINED;
-    }
-
-    return v;
-  }
-
-  protected variant string look_back_source() {
-    return look_back_source(1);
-  }
-
-  protected string peek_source(int n) {
-    ADD_CALL_COUNT();
-    ASSERT_DEBUG(n > 0, "n must be greater than 0\n");
-
-    int pos = source->tell();
-    string data = source->read(n);
-    source->seek(pos, Stdio.SEEK_SET);
-
-    if (data == "") {
+    if (data == '\0') {
       return UNDEFINED;
     }
 
     return data;
   }
 
-  protected variant string peek_source() {
-    return peek_source(1);
-  }
-
-  protected string concat(int n) {
-    ADD_CALL_COUNT();
-    ASSERT_DEBUG(n > 0, "n must be greater than 0\n");
-    string v = current;
-
-    if (!v || !advance(n)) {
-      ASSERT_DEBUG(current, "Trying to concat beyond end\n");
-      return UNDEFINED;
-    }
-
-    return current = v + current;
-  }
-
-  protected variant string concat() {
-    return concat(1);
-  }
-
   protected bool read_word(string word) {
     ADD_CALL_COUNT();
     int len = sizeof(word);
-    int pos = source->tell();
+    int pos = cursor;
     int col_in = column;
     simple_put_back();
 
     String.Buffer buf = String.Buffer();
-    function add = buf->add;
+    function add = buf->putchar;
 
-    loop: while (string s = consume()) {
-      int c = s[0];
+    loop: while (int c = consume()) {
       switch (c) {
         case '_':
         case '0'..'9':
         // FIXME: Add support for ISO-8859-* and what not
         case 'a'..'z':
         case 'A'..'Z':
-          add(s);
+          add(c);
           break;
 
         default:
@@ -344,34 +289,33 @@ protected class BaseLexer {
 
     if (w != word) {
       column = col_in;
-      source->seek(pos, Stdio.SEEK_SET);
+      cursor = pos;
       return false;
     }
 
-    current = w;
+    current_string = w;
 
     return true;
   }
 
   protected array low_read_word() {
     ADD_CALL_COUNT();
-    string old_current = current;
+    string old_current = current_string;
     int old_column = column;
-    int old_pos = source->tell();
+    int old_pos = cursor;
     simple_put_back();
 
     String.Buffer buf = String.Buffer();
-    function add = buf->add;
+    function add = buf->putchar;
 
-    loop: while (string s = read_non_ws()) {
-      int c = s[0];
+    loop: while (int c = read_non_ws()) {
       switch (c) {
         case '_':
         // FIXME: Add support for ISO-8859-* and what not
         case 'a'..'z':
         case 'A'..'Z':
         case '0'..'9':
-          add(s);
+          add(c);
           break;
 
         default:
@@ -383,52 +327,47 @@ protected class BaseLexer {
     string w = buf->get();
 
     if (sizeof(w) > 0) {
-      current = w;
+      current_string = w;
     }
 
     return ({ w, lambda () {
-      current = old_current;
+      current_string = old_current;
       column = old_column;
-      source->seek(old_pos, Stdio.SEEK_SET);
+      cursor = old_pos;
     }});
   }
 
   protected string read_line() {
     ADD_CALL_COUNT();
-    int pos = source->tell();
+    int pos = cursor;
     String.Buffer buf = String.Buffer();
-    function add = buf->add;
+    function add = buf->putchar;
 
-    while (string s = source->read(1)) {
-      if (s == "") {
-        break;
-      } else if (s == "\n") {
-        maybe_reset_lex_state();
+    while (int c = consume()) {
+      if (c == '\n') {
         simple_put_back();
+        line -= 1;
         break;
       }
 
-      add(s);
+      add(c);
     }
 
-    string w = buf->get();
-    column += sizeof(w);
-
-    return w;
+    return buf->get();
   }
 
   protected string read_number() {
     ADD_CALL_COUNT();
     String.Buffer buf = String.Buffer();
-    function add = buf->add;
+    function add = buf->putchar;
 
-    int cc = current[0];
+    int cc = char;
 
     if (!(cc >= '0' && cc <= '9')) {
       if (cc != '-' && cc != '.') {
-        SYNTAX_ERROR("Expected '-' or '.' but got %O\n", current);
+        SYNTAX_ERROR("Expected '-' or '.' but got '%c'\n", char);
       }
-      add(current);
+      add(char);
     } else {
       // Put back the current digit, which should be the first in the number,
       // and let the loop below add it
@@ -445,48 +384,46 @@ protected class BaseLexer {
       NUM_OCTAL,
     };
 
-    NumState state = current == "." ? NUM_FLOAT : NUM_NONE;
+    NumState state = char == '.' ? NUM_FLOAT : NUM_NONE;
 
     #define exit_loop() do {                              \
       column -= 1;                                        \
-      source->seek(-1, Stdio.SEEK_CUR);                   \
+      cursor -= 1;                                        \
       break loop;                                         \
     } while (0)
 
     #define read_digits() do {                            \
-      while (string ss = read_non_ws()) {                 \
-        switch (ss[0]) {                                  \
-          case '0'..'9': add(ss); break;                  \
+      while (int c = read_non_ws()) {                     \
+        switch (c) {                                      \
+          case '0'..'9': add(c); break;                   \
           default: exit_loop();                           \
         }                                                 \
       }                                                   \
     } while (0)
 
     #define read_hex_digits() do {                        \
-      while (string ss = read_non_ws()) {                 \
-        switch (ss[0]) {                                  \
-          case '0'..'9': add(ss); break;                  \
-          case 'a'..'f': case 'A'..'F': add(ss); break;   \
+      while (int c = read_non_ws()) {                     \
+        switch (c) {                                      \
+          case '0'..'9': add(c); break;                   \
+          case 'a'..'f': case 'A'..'F': add(c); break;    \
           default: exit_loop();                           \
         }                                                 \
       }                                                   \
     } while (0)
 
     #define read_binary_digits() do {                     \
-      while (string ss = read_non_ws()) {                 \
-        switch (ss[0]) {                                  \
-          case '0'..'1': add(ss); break;                  \
+      while (int c = read_non_ws()) {                     \
+        switch (c) {                                      \
+          case '0'..'1': add(c); break;                   \
           default: exit_loop();                           \
         }                                                 \
       }                                                   \
     } while (0)
 
-    loop: while (string s = read_non_ws()) {
-      int c = s[0];
-
+    loop: while (int c = read_non_ws()) {
       if (c == '.') {
         // Range, e.g [1..10]
-        if (peek_source() == ".") {
+        if (peek_source() == '.') {
           exit_loop();
         }
 
@@ -495,37 +432,39 @@ protected class BaseLexer {
         }
 
         state = NUM_FLOAT;
-        add(s);
+        add(c);
       } else if (c == '0' && state == NUM_NONE) {
-        string next = peek_source();
+        int next = peek_source();
 
-        if ((< "x", "X" >)[next]) {
+        if ((< 'x', 'X' >)[next]) {
           state = NUM_HEX;
-          add(s, read_non_ws());
+          add(c);
+          add(read_non_ws());
           read_hex_digits();
-        } else if ((< "b", "B" >)[next]) {
+        } else if ((< 'b', 'B' >)[next]) {
           state = NUM_BIN;
-          add(s, read_non_ws());
+          add(c);
+          add(read_non_ws());
           read_binary_digits();
         } else if (
           next && !(<
-            ".", ")", ";", ",", ":",
-            "\\", "]", ">", "}", " ", "\t", "\n"
+            '.', ')', ';', ',', ':',
+            '\\', ']', '>', '}', ' ', '\t', '\n'
           >)[next]
         ) {
           // Is this actually octal, e.g. 0755 as access mode?
           state = NUM_OCTAL;
-          add(s);
+          add(c);
           read_digits();
         } else {
           state = NUM_INT;
-          add(s);
+          add(c);
         }
-      } else if ((< "e", "E" >)[s]) {
+      } else if ((< 'e', 'E' >)[c]) {
         state = NUM_EXP;
-        add(s);
-        string next = peek_source();
-        if (next == "-" || next == "+") {
+        add(c);
+        int next = peek_source();
+        if (next == '-' || next == '+') {
           add(consume());
         }
         read_digits();
@@ -534,7 +473,7 @@ protected class BaseLexer {
           state = NUM_INT;
         }
 
-        add(s);
+        add(c);
       } else {
         exit_loop();
       }
@@ -548,22 +487,16 @@ protected class BaseLexer {
     return buf->get();
   }
 
-  protected bool gobble(string|int char) {
+  protected bool gobble(int c) {
     ADD_CALL_COUNT();
-    string next = peek_source();
-    bool ok = false;
+    int next = peek_source();
 
-    if (next && intp(char)) {
-      ok = next[0] == char;
-    } else if (next) {
-      ok = next == char;
+    if (next == c) {
+      advance();
+      return true;
     }
 
-    if (ok) {
-      consume();
-    }
-
-    return ok;
+    return false;
   }
 }
 
@@ -571,17 +504,19 @@ class Lexer {
   inherit BaseLexer;
 
   public .Token.Token lex() {
+    current_string = UNDEFINED;
+
     if (!advance()) {
       return UNDEFINED;
     }
 
     eat_whitespace_and_newline();
 
-    if (!current) {
+    if (!char || char == '\0') {
       return UNDEFINED;
     }
 
-    TRACE("Current: %O at (%d:%d)\n", current, line, column);
+    TRACE("Current: \"%c\" at (%d:%d)\n", char, line, column);
 
     set_start_position();
 
@@ -589,256 +524,235 @@ class Lexer {
       return lex_unquoted(.Token.MACRO_LITERAL);
     }
 
-    switch (current) {
-      case "\\": {
+    switch (char) {
+      case '\\': {
         TRACE("Current is backslash (\\)");
         if (lex_state != LEX_STATE_PREPROC_DEFINE) {
-          SYNTAX_ERROR("Illegal character %O\n", current);
+          SYNTAX_ERROR("Illegal character '%c'\n", char);
         }
 
         return make_simple_token(.Token.CONT_LINE);
       }
 
-      case "(": {
-        string next = peek_source();
-
-        if (next == "{") {
-          return concat() && make_simple_token(.Token.ARRAY_START);
-        } else if (next == "[") {
-          return concat() && make_simple_token(.Token.MAPPING_START);
-        } else if (next == "<") {
-          return concat() && make_simple_token(.Token.MULTISET_START);
-        } else if (next == "?") {
-          return concat() && make_simple_token(.Token.SAFE_APPLY);
+      case '(': {
+        if (gobble('{')) {
+          return make_simple_token("({", .Token.ARRAY_START);
+        } else if (gobble('[')) {
+          return make_simple_token("([", .Token.MAPPING_START);
+        } else if (gobble('<')) {
+          return make_simple_token("(<", .Token.MULTISET_START);
+        } else if (gobble('?')) {
+          return make_simple_token("(?", .Token.SAFE_APPLY);
         }
-
         return make_simple_token(.Token.PAREN_LEFT);
       }
 
-      case "]": {
-        if (peek_source() == ")") {
-          return concat() && make_simple_token(.Token.MAPPING_END);
+      case ']': {
+        if (gobble(')')) {
+          return make_simple_token("])", .Token.MAPPING_END);
         }
-
         return make_simple_token(.Token.BRACKET_RIGHT);
       }
 
-      case ")": {
+      case ')': {
         return make_simple_token(.Token.PAREN_RIGHT);
       }
 
-      case "}": {
-        if (peek_source() == ")") {
-          return concat() && make_simple_token(.Token.ARRAY_END);
+      case '}': {
+        if (gobble(')')) {
+          return make_simple_token("})", .Token.ARRAY_END);
         }
 
         return make_simple_token(.Token.CURLY_RIGHT);
       }
 
-      case ">": {
-        string next = peek_source();
-
-        if (next == ")") {
-          return concat() && make_simple_token(.Token.MULTISET_END);
-        } else if (next == ">") {
-          if (peek_source(2) == ">=") {
-            return concat(2) && make_simple_token(.Token.RSH_EQ);
+      case '>': {
+        if (gobble(')')) {
+          return make_simple_token(">)", .Token.MULTISET_END);
+        } else if (gobble('>')) {
+          if (gobble('=')) {
+            return make_simple_token(">>=", .Token.RSH_EQ);
           }
-          return concat() && make_simple_token(.Token.RSH);
-        } else if (next == "=") {
-          return concat() && make_simple_token(.Token.GE);
+          return make_simple_token(">>", .Token.RSH);
+        } else if (gobble('=')) {
+          return make_simple_token(">=", .Token.GE);
         }
 
         return make_simple_token(.Token.GREATER_THAN);
       }
 
-      case "[": {
-        if (peek_source() == "?") {
-          return concat() && make_simple_token(.Token.SAFE_START_INDEX);
+      case '[': {
+        if (gobble('?')) {
+          return make_simple_token("[?", .Token.SAFE_START_INDEX);
         }
         return make_simple_token(.Token.BRACKET_LEFT);
       }
 
-      case "{": {
+      case '{': {
         return make_simple_token(.Token.CURLY_LEFT);
       }
 
-      case "<": {
-        string next = peek_source();
-
-        if (next == "<") {
-          if (peek_source(2) == "<=") {
-            return concat(2) && make_simple_token(.Token.LSH_EQ);
+      case '<': {
+        if (gobble('<')) {
+          if (gobble('=')) {
+            return make_simple_token("<<=", .Token.LSH_EQ);
           }
-          return concat() && make_simple_token(.Token.LSH);
-        } else if (next == "=") {
-          return concat() && make_simple_token(.Token.LE);
+          return make_simple_token("<<", .Token.LSH);
+        } else if (gobble('=')) {
+          return make_simple_token("<=", .Token.LE);
         }
 
         return make_simple_token(.Token.LESS_THAN);
       }
 
-      case "!": {
-        if (peek_source() == "=") {
-          return concat() && make_simple_token(.Token.NE);
+      case '!': {
+        if (gobble('=')) {
+          return make_simple_token("!=", .Token.NE);
         }
         return make_simple_token(.Token.NOT);
       }
 
-      case "=": {
-        if (peek_source() == "=") {
-          return concat() && make_simple_token(.Token.EQ);
+      case '=': {
+        if (gobble('=')) {
+          return make_simple_token("==", .Token.EQ);
         }
         return make_simple_token(.Token.ASSIGN);
       }
 
-      case "-": {
-        string next = peek_source();
-
-        if (next == "-") {
-          return concat() && make_simple_token(.Token.DEC);
-        } else if (next == "=") {
-          return concat() && make_simple_token(.Token.SUB_EQ);
-        } else if (next == ">") {
-          if (peek_source(2) == ">?") {
-            return concat(2) && make_simple_token(.Token.SAFE_INDEX);
+      case '-': {
+        if (gobble('-')) {
+          return make_simple_token("--", .Token.DEC);
+        } else if (gobble('=')) {
+          return make_simple_token("-=", .Token.SUB_EQ);
+        } else if (gobble('>')) {
+          if (gobble('?')) {
+            return make_simple_token("->?", .Token.SAFE_INDEX);
           }
-          return concat() && make_simple_token(.Token.ARROW);
+          return make_simple_token("->", .Token.ARROW);
         }
 
-        int next_c = next && next[0];
-        if (next_c) {
-          if ((next_c >= '0' && next_c <= '9') || next_c == '.') {
-            return lex_number();
-          }
+        int next_c = peek_source();
+
+        if (next_c && ((next_c >= '0' && next_c <= '9') || next_c == '.')) {
+          return lex_number();
         }
 
         return make_simple_token(.Token.MINUS);
       }
 
-      case "+":  {
-        string next = peek_source();
-
-        if (next == "+") {
-          return concat() && make_simple_token(.Token.INC);
-        } else if (next == "=") {
-          return concat() && make_simple_token(.Token.ADD_EQ);
+      case '+':  {
+        if (gobble('+')) {
+          return make_simple_token("++", .Token.INC);
+        } else if (gobble('=')) {
+          return make_simple_token("+=", .Token.ADD_EQ);
         }
 
         return make_simple_token(.Token.PLUS);
       }
 
-      case "&": {
-        string next = peek_source();
-
-        if (next == "&") {
-          return concat() && make_simple_token(.Token.LAND);
-        } else if (next == "=") {
-          return concat() && make_simple_token(.Token.AND_EQ);
+      case '&': {
+        if (gobble('&')) {
+          return make_simple_token("&&", .Token.LAND);
+        } else if (gobble('=')) {
+          return make_simple_token("&=", .Token.AND_EQ);
         }
-
         return make_simple_token(.Token.AMP);
       }
 
-      case "|": {
-        string next = peek_source();
-
-        if (next == "|") {
-          return concat() && make_simple_token(.Token.LOR);
-        } else if (next == "=") {
-          return concat() && make_simple_token(.Token.OR_EQ);
+      case '|': {
+        if (gobble('|')) {
+          return make_simple_token("||", .Token.LOR);
+        } else if (gobble('=')) {
+          return make_simple_token("|=", .Token.OR_EQ);
         }
-
         return make_simple_token(.Token.PIPE);
       }
 
-      case ".": {
-        string next = peek_source();
-        if (next == ".") {
-          if (peek_source(2) == "..") {
-            return concat(2) && make_simple_token(.Token.DOT_DOT_DOT);
+      case '.': {
+        if (gobble('.')) {
+          if (gobble('.')) {
+            return make_simple_token("...", .Token.DOT_DOT_DOT);
           }
-          return concat() && make_simple_token(.Token.DOT_DOT);
-        } else if (next && next[0] >= '0' && next[0] <= '9') {
-          return lex_number();
+          return make_simple_token("..", .Token.DOT_DOT);
+        } else {
+          int next = peek_source();
+          if (next && next >= '0' && next <= '9') {
+            return lex_number();
+          }
         }
         return make_simple_token(.Token.DOT);
       }
 
-      case ":": {
-        if (peek_source() == ":") {
-          return concat() && make_simple_token(.Token.COLON_COLON);
+      case ':': {
+        if (gobble(':')) {
+          return make_simple_token("::", .Token.COLON_COLON);
         }
         return make_simple_token(.Token.COLON);
       }
 
-      case "^": {
-        if (peek_source() == "=") {
-          return concat() && make_simple_token(.Token.XOR_EQ);
+      case '^': {
+        if (gobble('=')) {
+          return make_simple_token("^=", .Token.XOR_EQ);
         }
         return make_simple_token(.Token.XOR);
       }
 
-      case "*": {
-        string next = peek_source();
-
-        if (next == "*") {
-          if (peek_source(2) == "*=") {
-            return concat(2) && make_simple_token(.Token.POW_EQ);
+      case '*': {
+        if (gobble('*')) {
+          if (gobble('=')) {
+            return make_simple_token("**=", .Token.POW_EQ);
           }
-          return concat() && make_simple_token(.Token.POW);
-        } else if (next == "=") {
-          return concat() && make_simple_token(.Token.MULT_EQ);
+          return make_simple_token("**", .Token.POW);
+        } else if (gobble('=')) {
+          return make_simple_token("*=", .Token.MULT_EQ);
         }
         return make_simple_token(.Token.MULT);
       }
 
-      case "/": {
-        string next = peek_source();
-
-        if (next == "=") {
-          return concat() && make_simple_token(.Token.DIV_EQ);
-        } else if (next == "/") {
+      case '/': {
+        if (gobble('=')) {
+          return make_simple_token("/=", .Token.DIV_EQ);
+        } else if (gobble('/')) {
           return lex_line_comment();
-        } else if (next == "*") {
+        } else if (gobble('*')) {
           return lex_block_comment();
         }
         return make_simple_token(.Token.DIV);
       }
 
-      case "?": {
-        if (peek_source() == "=") {
-          return concat() && make_simple_token(.Token.ATOMIC_GET_SET);
+      case '?': {
+        if (gobble('=')) {
+          return make_simple_token("?=", .Token.ATOMIC_GET_SET);
         }
         return make_simple_token(.Token.QUESTION);
       }
 
-      case ",": {
+      case ',': {
         return make_simple_token(.Token.COMMA);
       }
 
-      case ";": {
+      case ';': {
         return make_simple_token(.Token.SEMICOLON);
       }
 
-      case "~": {
+      case '~': {
         return make_simple_token(.Token.TILDE);
       }
 
-      case "@": {
+      case '@': {
         return make_simple_token(.Token.AT);
       }
 
-      case "\"": {
+      case '"': {
         return lex_string();
       }
 
-      case "'": {
+      case '\'': {
         return lex_character_literal();
       }
 
-      case "_": {
-        if (peek_source() == "_") {
+      case '_': {
+        if (peek_source() == '_') {
           if (.Token.Token t = lex_magic_dunderscore()) {
             return t;
           }
@@ -849,22 +763,22 @@ class Lexer {
         return lex_symbol_name();
       }
 
-      case "%": {
-        if (peek_source() == "=") {
-          return concat() && make_simple_token(.Token.MOD_EQ);
+      case '%': {
+        if (gobble('=')) {
+          return make_simple_token("%=", .Token.MOD_EQ);
         }
         return make_simple_token(.Token.MOD);
       }
 
-      case "`": {
+      case '`': {
         return lex_backtick();
       }
 
-      case "#": {
-        string next = peek_source();
+      case '#': {
+        int next = peek_source();
         // FIXME: There are more valid multiline string delimiters than " I
         //        think. Verify that stuff.
-        if (next == "\"") {
+        if (next == '"') {
           return lex_multiline_string();
         }
 
@@ -872,8 +786,6 @@ class Lexer {
       }
 
       default: {
-        int char = current[0];
-
         // FIXME: Support wider charset
         if (char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z') {
           if (.Token.Token t = lex_identifier()) {
@@ -889,13 +801,14 @@ class Lexer {
           }
         }
 
-        SYNTAX_ERROR("Unknown token %O", current);
+        SYNTAX_ERROR("Unknown token '%c'", char);
       }
     }
   }
 
   private .Token.Token lex_magic_dunderscore() {
     [string word, function reset] = low_read_word();
+    current_string = word;
 
     switch (word) {
       case "__attribute__": return make_simple_token(.Token.ATTRIBUTE_ID);
@@ -983,45 +896,37 @@ class Lexer {
   private .Token.Token lex_line_comment() {
     string line = read_line();
 
-    if (has_prefix(line, "/!")) {
-      current = line[2..];
+    if (has_prefix(line, "!")) {
+      current_string = line[1..];
       return make_simple_token(.Token.DOC_COMMENT);
-    } else if (has_prefix(line, "/", )) {
-      current = line[1..];
+    } else {
+      current_string = line;
       return make_simple_token(.Token.COMMENT);
     }
 
-    TODO("Return token\n");
+    TODO("Return token from lex_line_comment()\n");
   }
 
   private .Token.Token lex_block_comment() {
-    int pos = source->tell();
-
+    int pos = cursor;
     String.Buffer buf = String.Buffer();
-    function add = buf->add;
+    function add = buf->putchar;
 
-    while (string s = source->read(1)) {
-      if (s == "") {
+    while (true) {
+      int c = consume();
+
+      if (c == UNDEFINED) {
         SYNTAX_ERROR("Unterminated block comment\n");
       }
 
-      if (s == "*" && peek_source() == "/") {
-        column += 2;
-        source->read(1);
+      if (c == '*' && gobble('/')) {
         break;
       }
 
-      if (s == "\n") {
-        inc_line();
-      } else {
-        column += 1;
-      }
-
-      add(s);
+      add(c);
     }
 
-    string v = buf->get();
-    current = v[1..];
+    current_string = buf->get();
 
     return make_simple_token(.Token.BLOCK_COMMENT);
   }
@@ -1030,20 +935,20 @@ class Lexer {
   private .Token.Token lex_multiline_string() {
     int pos = cursor;
     String.Buffer buf = String.Buffer();
-    function add = buf->add;
+    function add = buf->putchar;
     // Eat the current "
-    string prev = consume();
+    int prev = consume();
 
-    while (string s = consume(1)) {
-      if (s == "\"" && prev != "\\") {
+    while (int c = consume()) {
+      if (c == '"' && prev != '\\') {
         break;
       }
 
-      add(s);
-      prev = s;
+      add(c);
+      prev = c;
     }
 
-    current = buf->get();
+    current_string = buf->get();
 
     return make_simple_token(.Token.STRING);
   }
@@ -1052,26 +957,27 @@ class Lexer {
   private .Token.Token lex_string() {
     int pos = cursor;
     String.Buffer buf = String.Buffer();
-    function add = buf->add;
-    string prev = "";
+    function add = buf->putchar;
+    int prev;
 
-    while (string s = source->read(1)) {
-      column += 1;
-      if (s == "\n") {
+    while (true) {
+      int c = consume();
+
+      if (c == '\n') {
         TODO("Handle Newline in string\n");
-      } else if (s == "" ) {
+      } else if (c == UNDEFINED) {
         SYNTAX_ERROR("Unterminated string literal\n");
       }
 
-      if (s == "\"" && prev != "\\") {
+      if (c == '"' && prev != '\\') {
         break;
       }
 
-      add(s);
-      prev = s;
+      add(c);
+      prev = c;
     }
 
-    current = buf->get();
+    current_string = buf->get();
 
     return make_simple_token(.Token.STRING);
   }
@@ -1080,29 +986,29 @@ class Lexer {
   private .Token.Token lex_character_literal() {
     advance();
 
-    if (current == "\\") {
+    if (char == '\\') {
       advance();
-      current = "\\" + current;
-      if (!gobble("'")) {
+      if (!gobble('\'')) {
         SYNTAX_ERROR("Unterminated character literal\n");
       }
+      current_string = sprintf("\\%c", char);
       return make_simple_token(.Token.CHAR);
     }
 
-    if (peek_source() != "'") {
+    if (peek_source() != '\'') {
       SYNTAX_ERROR("Unterminated character literal\n");
     }
 
-    string v = current;
+    int v = char;
     advance();
-    current = v;
+    current_string = sprintf("%c", v);
 
     return make_simple_token(.Token.CHAR);
   }
 
   private .Token.Token lex_number() {
-    current = read_number();
-    .Token.Type t = is_float(current) ? .Token.FLOAT : .Token.NUMBER;
+    current_string = read_number();
+    .Token.Type t = is_float(current_string) ? .Token.FLOAT : .Token.NUMBER;
     return make_simple_token(t);
   }
 
@@ -1113,8 +1019,6 @@ class Lexer {
       SYNTAX_ERROR("Unresolved symbol\n");
     }
 
-    current = word;
-
     return make_simple_token(.Token.SYMBOL_NAME);
   }
 
@@ -1122,11 +1026,10 @@ class Lexer {
     // low_read_word() will step back one character
     consume();
     [string word, function reset] = low_read_word();
-    current = word;
 
-    if ((< "pike", "charset", "pragma", "include" >)[current]) {
+    if ((< "pike", "charset", "pragma", "include" >)[current_string]) {
       lex_state = LEX_STATE_PREPROC_UNQUOTED;
-    } else if (current == "define") {
+    } else if (current_string == "define") {
       TRACE("*** Set lex state to macro define\n");
       lex_state = LEX_STATE_PREPROC_DEFINE;
     }
@@ -1138,30 +1041,28 @@ class Lexer {
     simple_put_back();
 
     String.Buffer buf = String.Buffer();
-    function add = buf->add;
+    function add = buf->putchar;
 
-    while (string s = read_non_ws()) {
-      add(s);
+    while (int c = read_non_ws()) {
+      add(c);
     }
 
-    current = buf->get();
+    current_string = buf->get();
     return make_simple_token(t);
   }
 
   private .Token.Token lex_backtick() {
-    string next = peek_source();
+    int next_c = peek_source();
 
-    if (!next) {
+    if (!next_c) {
       SYNTAX_ERROR("Expecting token after `\n");
     }
 
-    #define ASSERT_VALID_NEXT() do {                                      \
-      if (!(< " ", "\t", "\v", "\n", "(", ",", ";" >)[peek_source()]) {   \
-        SYNTAX_ERROR("Illegal ` identifier. Expected %s", current);       \
-      }                                                                   \
+    #define ASSERT_VALID_NEXT() do {                                          \
+      if (!(< ' ', '\t', '\v', '\n', '(', ',', ';' >)[peek_source()]) {       \
+        SYNTAX_ERROR("Illegal ` identifier. Expected %s", current_string);    \
+      }                                                                       \
     } while (0)
-
-    int next_c = next[0];
 
     if (
       next_c == '_' ||
@@ -1171,11 +1072,11 @@ class Lexer {
       consume();
       [string word, function reset] = low_read_word();
 
-      if (word && gobble("=")) {
+      if (word && gobble('=')) {
         word += "=";
       }
 
-      current = "`" + word;
+      current_string = "`" + word;
 
       ASSERT_VALID_NEXT();
 
@@ -1183,19 +1084,17 @@ class Lexer {
     }
 
     if (next_c == '(') {
-      move(2);
+      advance();
+      advance();
 
-      if (current != ")") {
+      if (char != ')') {
         SYNTAX_ERROR("Illegal ` identifier. Expected `()");
       }
 
-      current = "`()";
-      return make_simple_token(.Token.SYMBOL_NAME);
+      return make_simple_token("`()", .Token.SYMBOL_NAME);
     }
 
-    while (string n = advance()) {
-      int c = n[0];
-
+    while (int c = advance()) {
       switch (c) {
         case '%':
         case '&':
@@ -1204,16 +1103,16 @@ class Lexer {
         case '^':
         case '|':
         case '~': {
-          current = sprintf("`%s", n);
+          current_string = sprintf("`%c", c);
           ASSERT_VALID_NEXT();
           return make_simple_token(.Token.SYMBOL_NAME);
         }
 
         case '!': {
-          if (gobble("=")) {
-            current = "`!=";
+          if (gobble('=')) {
+            current_string = "`!=";
           } else {
-            current = "`!";
+            current_string = "`!";
           }
 
           ASSERT_VALID_NEXT();
@@ -1221,10 +1120,10 @@ class Lexer {
         }
 
         case '*': {
-          if (gobble("*")) {
-            current = "`**";
+          if (gobble('*')) {
+            current_string = "`**";
           } else {
-            current = "`*";
+            current_string = "`*";
           }
 
           ASSERT_VALID_NEXT();
@@ -1232,14 +1131,14 @@ class Lexer {
         }
 
         case '-': {
-          if (gobble(">")) {
-            if (gobble("=")) {
-              current = "`->=";
+          if (gobble('>')) {
+            if (gobble('=')) {
+              current_string = "`->=";
             } else {
-              current = "`->";
+              current_string = "`->";
             }
           } else {
-            current = "`-";
+            current_string = "`-";
           }
 
           ASSERT_VALID_NEXT();
@@ -1247,12 +1146,12 @@ class Lexer {
         }
 
         case '<': {
-          if (gobble("<")) {
-            current = "`<<";
-          } else if (gobble("=")) {
-            current = "`<=";
+          if (gobble('<')) {
+            current_string = "`<<";
+          } else if (gobble('=')) {
+            current_string = "`<=";
           } else {
-            current = "`<";
+            current_string = "`<";
           }
 
           ASSERT_VALID_NEXT();
@@ -1260,12 +1159,12 @@ class Lexer {
         }
 
         case '>': {
-          if (gobble(">")) {
-            current = "`>>";
-          } else if (gobble("=")) {
-            current = "`>=";
+          if (gobble('>')) {
+            current_string = "`>>";
+          } else if (gobble('=')) {
+            current_string = "`>=";
           } else {
-            current = "`>";
+            current_string = "`>";
           }
 
           ASSERT_VALID_NEXT();
@@ -1273,8 +1172,8 @@ class Lexer {
         }
 
         case '=': {
-          if (gobble("=")) {
-            current = "`==";
+          if (gobble('=')) {
+            current_string = "`==";
           } else {
             SYNTAX_ERROR("Illegal ` identifier. Expected `==");
           }
@@ -1284,21 +1183,21 @@ class Lexer {
         }
 
         case '[': {
-          if (gobble("]")) {
-            current = "`[]";
-            if (gobble("=")) {
-              current += "=";
+          if (gobble(']')) {
+            current_string = "`[]";
+            if (gobble('=')) {
+              current_string += "=";
             }
-          } else if (gobble(".")) {
-            if (!gobble(".")) {
+          } else if (gobble('.')) {
+            if (!gobble('.')) {
               SYNTAX_ERROR("Illegal ` identifier. Expected `[..]");
             }
 
-            if (!gobble("]")) {
+            if (!gobble(']')) {
               SYNTAX_ERROR("Illegal ` identifier. Expected `[..]");
             }
 
-            current = "`[..]";
+            current_string = "`[..]";
           } else {
             SYNTAX_ERROR("Illegal ` identifier. Expected `[..]");
           }
