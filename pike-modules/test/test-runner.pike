@@ -1,3 +1,4 @@
+#require constant(Pest)
 import Pest;
 
 class MyArgs {
