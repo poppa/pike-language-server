@@ -825,13 +825,21 @@ class Lexer {
       case "__weak__": return make_simple_token(.Token.WEAK);
     }
 
-    // FIXME: According to the Pike lexer `__UPCASE__` symbols are okay to
-    //        define by the user. It's lowercase ones that are reserved from
-    //        what I now understand.
     if (has_suffix(word, "__")) {
-      // SYNTAX_ERROR(
-      //   "Symbols with leading and tailing double underscores are reserved\n"
-      // );
+      // According to the Pike lexer `__UPCASE__` symbols are okay to
+      // define by the user but symbols containing lowercase chars are
+      // reserved for keywords.
+      sscanf(word, "__%s__", string wd);
+
+      for (int i; i < sizeof(wd); i++) {
+        if (wd[i] >= 'a' && wd[i] <= 'z') {
+          SYNTAX_ERROR(
+            "Symbols with lowercase US-ASCII characters with leading and "
+            "tailing double underscores are reserved for keywords.\n"
+          );
+        }
+      }
+
       return make_simple_token(.Token.DUNDERSCORE);
     }
 

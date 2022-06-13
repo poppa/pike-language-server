@@ -423,6 +423,28 @@ describe("Magic underscore identifiers", lambda () {
     expect(tok->type)->to_equal(WEAK);
     expect(tok->value)->to_equal("__weak__");
   });
+
+  test(
+    "It should allow user defined dunderscore symbols with non-us-ascii chars",
+    lambda () {
+      Token t = Lexer("__OK__")->lex();
+      expect(t->type)->to_equal(DUNDERSCORE);
+      expect(t->value)->to_equal("__OK__");
+
+      t = Lexer("__OK_OK2__")->lex();
+      expect(t->type)->to_equal(DUNDERSCORE);
+      expect(t->value)->to_equal("__OK_OK2__");
+    }
+  );
+
+  test(
+    "It should throw on user defined dunderscore symbol with only "
+    "us-ascii chars",
+    lambda () {
+      Token t = Lexer("__nogood__");
+      expect(lambda() { t->lex(); })->to_throw();
+    }
+  );
 });
 
 /*******************************************************************************
@@ -1256,13 +1278,6 @@ describe("Symbol names", lambda () {
     expect(t->type)->to_equal(SYMBOL_NAME);
     expect(t->value)->to_equal("__my_symbol");
   });
-
-  test(
-    "It should lex leading and tailing dunderscore as DUNDERSCORE",
-    lambda () {
-      expect(Lexer("__my_symbol__")->lex()->type)->to_equal(DUNDERSCORE);
-    }
-  );
 
   test("It should handle Pike special overload method names", lambda () {
     Lexer l = Lexer("`()(array in){}");
