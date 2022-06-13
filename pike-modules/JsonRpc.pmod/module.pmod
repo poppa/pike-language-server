@@ -150,7 +150,7 @@ protected BaseMessage construct_instance(
   BaseMessage instance = prog();
 
   foreach (indices(instance), string|mixed key) {
-    if (stringp(key) && !undefinedp(args[key]) && args[key] != Val.null) {
+    if (stringp(key) && !undefinedp(args[key])) {
       instance[key] = args[key];
     }
   }
