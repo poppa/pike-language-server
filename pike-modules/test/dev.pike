@@ -19,7 +19,7 @@ int main() {
 
   werror("Tokenized the entire file: %O tokens in %fs\n", sizeof(toks), res);
 
-  #ifdef AST_CALL_COUNT
+  #ifdef LEXER_CALL_COUNT
   werror("Call count: %O\n", get_call_count());
   #endif
 

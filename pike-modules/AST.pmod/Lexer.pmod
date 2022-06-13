@@ -2,7 +2,7 @@
 #pike __REAL_VERSION__
 #require constant(Regexp.PCRE.Widestring)
 
-#include "ast.h"
+#include "lexer.h"
 
 #define REGEX Regexp.PCRE.Widestring
 #define RegexpOption Regexp.PCRE.OPTION
@@ -23,20 +23,6 @@ protected bool is_float(string value) {
   return re->match(value);
 }
 
-#ifdef AST_CALL_COUNT
-  private mapping(string:int) _call_count = ([]);
-  public mapping(string:int) get_call_count() {
-    return _call_count;
-  }
-  #define ADD_CALL_COUNT() {                                                \
-    string cls = sprintf("%O", object_program(this));                       \
-    string key = cls + "->" __func__ "()";                                  \
-    _call_count[key] += 1;                                                  \
-  }
-#else
-  #define ADD_CALL_COUNT() 0
-#endif // AST_CALL_COUNT
-
 public enum State {
   LEX_STATE_DEFAULT,
   LEX_STATE_PREPROC_UNQUOTED,
@@ -47,15 +33,6 @@ public enum State {
 #define IS_STATE_UNQUOTED (lex_state == LEX_STATE_PREPROC_UNQUOTED)
 #define IS_STATE_DEFINE (lex_state == LEX_STATE_PREPROC_DEFINE)
 
-#define SYNTAX_ERROR(ARGS...) {                                           \
-  string msg = sprintf(ARGS);                                             \
-  if (!has_suffix(msg, "\n")) {                                           \
-    msg += "\n";                                                          \
-  }                                                                       \
-  msg += position_info_message;                                           \
-  error(msg);                                                             \
-}
-
 public multiset(int) whitepsaces = (<
   0x9, 0xa, 0xb, 0xc, 0xd, 0x20, 0x85, 0xa0, 0x1680, 0x2000,
   0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008,
@@ -64,7 +41,7 @@ public multiset(int) whitepsaces = (<
 
 #define is_whitespace(CHAR) whitepsaces[(CHAR)]
 #define is_digit(CHAR) ((CHAR) >= '0' && (CHAR) <= '9')
-// FIXME: Support wider charset
+// FIXME: Support wider charsets
 #define is_alpha(CH) ((CH) >= 'a' && (CH) <= 'z' || (CH) >= 'A' && (CH) <= 'Z')
 
 protected class BaseLexer {
