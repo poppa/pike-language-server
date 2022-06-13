@@ -24,8 +24,12 @@ protected bool is_float(string value) {
 }
 
 public enum State {
+  //! Default lexer state
   LEX_STATE_DEFAULT,
+  //! Lexer state when in various macros, like @tt{#include@}, @tt{#pragma@},
+  //! @tt{#pike@} etc.
   LEX_STATE_PREPROC_UNQUOTED,
+  //! Lexer state when inside a pound-define
   LEX_STATE_PREPROC_DEFINE,
 }
 
@@ -107,6 +111,11 @@ protected class BaseLexer {
     }
 
     return msg;
+  }
+
+  //! Returns the current @[State] of the lexer
+  public State `state() {
+    return lex_state;
   }
 
   //! Returns the input filename. If the input source was a file on disk the

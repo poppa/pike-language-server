@@ -1541,6 +1541,21 @@ describe("Preprocessor Macros", lambda () {
     expect(toks[0]->type)->to_equal(MACRO_DIR);
   });
 
+  test("It should manage non-unquoted preproc stuff", lambda () {
+    Lexer l = Lexer("#require constant(Pest)");
+    array(Token) tokens = ({});
+    while (Token t = l->lex()) {
+      tokens += ({ t });
+    }
+
+    expect(sizeof(tokens))->to_equal(5);
+    expect(tokens[0]->type)->to_equal(MACRO_DIR);
+    expect(tokens[1]->type)->to_equal(CONSTANT);
+    expect(tokens[2]->type)->to_equal(PAREN_LEFT);
+    expect(tokens[3]->type)->to_equal(SYMBOL_NAME);
+    expect(tokens[4]->type)->to_equal(PAREN_RIGHT);
+  });
+
   test("It should manage a multiline pound-define", lambda () {
     Lexer l = Lexer(#"
     #define READ_NUM(N) do { \
