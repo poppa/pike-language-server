@@ -56,6 +56,17 @@ public enum State {
   error(msg);                                                             \
 }
 
+public multiset(int) whitepsaces = (<
+  0x9, 0xa, 0xb, 0xc, 0xd, 0x20, 0x85, 0xa0, 0x1680, 0x2000,
+  0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008,
+  0x2009, 0x200a, 0x202f, 0x205f, 0x3000, 0xfeff
+>);
+
+#define is_whitespace(CHAR) whitepsaces[(CHAR)]
+#define is_digit(CHAR) ((CHAR) >= '0' && (CHAR) <= '9')
+// FIXME: Support wider charset
+#define is_alpha(CH) ((CH) >= 'a' && (CH) <= 'z' || (CH) >= 'A' && (CH) <= 'Z')
+
 protected class BaseLexer {
   protected string source;
   protected int length;
@@ -208,7 +219,7 @@ protected class BaseLexer {
     int prev_line = line;
     int value = consume();
 
-    if ((<'\n', '\t', '\v', ' '>)[value]) {
+    if (is_whitespace(value)) {
       cursor -= 1;
       column = prev_col;
       line = prev_line;
@@ -230,14 +241,10 @@ protected class BaseLexer {
     column = 0;
   }
 
-  protected void eat_whitespace() {
-    while ((< ' ', '\t', '\v' >)[char]) {
-      advance();
-    }
-  }
-
   protected void eat_whitespace_and_newline() {
-    while ((< ' ', '\t', '\v', '\n' >)[char]) {
+    ADD_CALL_COUNT();
+
+    while (is_whitespace(char)) {
       advance();
     }
   }
@@ -363,9 +370,9 @@ protected class BaseLexer {
 
     int cc = char;
 
-    if (!(cc >= '0' && cc <= '9')) {
-      if (cc != '-' && cc != '.') {
-        SYNTAX_ERROR("Expected '-' or '.' but got '%c'\n", char);
+    if (!is_digit(cc)) {
+      if (!(< '-', '.' >)[cc]) {
+        SYNTAX_ERROR("Expected '-' or '.' but got '%c'\n", cc);
       }
       add(char);
     } else {
@@ -526,7 +533,7 @@ class Lexer {
 
     switch (char) {
       case '\\': {
-        TRACE("Current is backslash (\\)");
+        TRACE("Current is backslash (\\)\n");
         if (lex_state != LEX_STATE_PREPROC_DEFINE) {
           SYNTAX_ERROR("Illegal character '%c'\n", char);
         }
@@ -633,7 +640,7 @@ class Lexer {
 
         int next_c = peek_source();
 
-        if (next_c && ((next_c >= '0' && next_c <= '9') || next_c == '.')) {
+        if (is_digit(next_c) || next_c == '.') {
           return lex_number();
         }
 
@@ -786,8 +793,7 @@ class Lexer {
       }
 
       default: {
-        // FIXME: Support wider charset
-        if (char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z') {
+        if (is_alpha(char)) {
           if (.Token.Token t = lex_identifier()) {
             return t;
           }
@@ -795,7 +801,7 @@ class Lexer {
           return lex_symbol_name();
         }
 
-        if (char >= '0' && char <= '9') {
+        if (is_digit(char)) {
           if (.Token.Token t = lex_number()) {
             return t;
           }
@@ -1064,11 +1070,7 @@ class Lexer {
       }                                                                       \
     } while (0)
 
-    if (
-      next_c == '_' ||
-      (next_c >= 'a' && next_c <= 'z') ||
-      (next_c >= 'A' && next_c <= 'Z')
-    ) {
+    if (next_c == '_' || is_alpha(next_c)) {
       consume();
       [string word, function reset] = low_read_word();
 
