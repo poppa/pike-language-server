@@ -48,6 +48,7 @@
     }
   },
   "scripts": {
+    "init": "npm ci && npm run git:init:pest",
     "vscode:prepublish": "npm run build:all",
     "test:pike": "pike -M pike-modules -M dev-deps pike-modules/test/test-runner.pike",
     "build:all": "npm run build --workspaces --if-present",
