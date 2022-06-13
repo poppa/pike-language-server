@@ -59,19 +59,18 @@ written a simple [`JSON-RPC` implementation](pike-modules/JsonRpc.pmod/module.pm
 ### Testing testing testing
 
 Personally I thing Pike's built-in testing framework is super-clonky and
-nothing I'd rather touch unless absolutely needed. So I've created my own,
-extremely limited, unit testing framework called
-[Pest](https://github.com/poppa/pest), which, you can tell by its name, is
-influenced by [Jest](https://jestjs.io/).
+har to use, so I've created my own, extremely limited, unit testing framework
+called [Pest](https://github.com/poppa/pest), which, you can tell by its name,
+is influenced by [Jest](https://jestjs.io/).
 
 All Pike tests reside in [pike-modules/test](pike-modules/test/).
 
-Pest will be a Git-submodule of this repository so nobody will need to clone
+Pest is a Git-submodule of this repository so you won't need to clone
 that repo to work with this.
 
 To run the Pike tests you can simply run `npm run test:pike` in the root of
 this repository. To run a specific test file, or a specific test, you can
-pass some argument:
+pass some arguments:
 
 ```sh
 # Run all test files starting with "lsp."
