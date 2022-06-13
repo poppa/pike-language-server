@@ -206,7 +206,7 @@ protected class BaseLexer {
     return value;
   }
 
-  protected void simple_put_back() {
+  protected void put_back() {
     ADD_CALL_COUNT();
     column -= 1;
     cursor -= 1;
@@ -249,7 +249,7 @@ protected class BaseLexer {
     int len = sizeof(word);
     int pos = cursor;
     int col_in = column;
-    simple_put_back();
+    put_back();
 
     String.Buffer buf = String.Buffer();
     function add = buf->putchar;
@@ -287,7 +287,7 @@ protected class BaseLexer {
     string old_current = current_string;
     int old_column = column;
     int old_pos = cursor;
-    simple_put_back();
+    put_back();
 
     String.Buffer buf = String.Buffer();
     function add = buf->putchar;
@@ -303,7 +303,7 @@ protected class BaseLexer {
           break;
 
         default:
-          simple_put_back();
+          put_back();
           break loop;
       }
     }
@@ -329,7 +329,7 @@ protected class BaseLexer {
 
     while (int c = consume()) {
       if (c == '\n') {
-        simple_put_back();
+        put_back();
         line -= 1;
         break;
       }
@@ -355,7 +355,7 @@ protected class BaseLexer {
     } else {
       // Put back the current digit, which should be the first in the number,
       // and let the loop below add it
-      simple_put_back();
+      put_back();
     }
 
     enum NumState {
@@ -1029,7 +1029,7 @@ class Lexer {
   }
 
   private .Token.Token lex_unquoted(.Token.Type t) {
-    simple_put_back();
+    put_back();
 
     String.Buffer buf = String.Buffer();
     function add = buf->putchar;
