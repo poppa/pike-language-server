@@ -48,7 +48,7 @@ public multiset(int) whitepsaces = (<
 // FIXME: Support wider charsets
 #define is_alpha(CH) ((CH) >= 'a' && (CH) <= 'z' || (CH) >= 'A' && (CH) <= 'Z')
 
-protected class BaseLexer {
+public class BaseLexer {
   protected string source;
   protected int length;
   protected int line = 1;

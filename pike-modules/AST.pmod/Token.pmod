@@ -281,6 +281,31 @@ public string type_to_string(Token|Type t) {
     "ZERO_ID",
   })[t] || "<< UNRESOLVED >>";
 }
+
+public bool is_access_modifer(Token t) {
+  return (< PUBLIC, PRIVATE, PROTECTED, STATIC >)[t->type];
+}
+
+public bool is_builtin_type(Token t) {
+  return (<
+    ARRAY_ID,
+    AUTO_ID,
+    FINAL_ID,
+    FLOAT_ID,
+    FUNCTION_ID,
+    INT_ID,
+    LOCAL_ID,
+    MAPPING_ID,
+    MIXED_ID,
+    MULTISET_ID,
+    OBJECT_ID,
+    PROGRAM_ID,
+    STRING_ID,
+    VOID_ID,
+    ZERO_ID,
+  >)[t->type];
+}
+
 constant PRAGMA_DIRECTIVES = (<
   "all_final",
   "all_inline",
