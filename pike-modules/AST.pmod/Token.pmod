@@ -1,6 +1,7 @@
 #charset utf-8
 #pike __REAL_VERSION__
 
+// NOTE: Keep this in sync with the string array below
 public enum Type {
   /* Taken from the C source */
 
@@ -135,7 +136,6 @@ public enum Type {
   PLUS,                                   // +
   QUESTION,                               // ?
   SEMICOLON,                              // ;
-  SYMBOL_NAME,                            // symbol name
   TILDE,                                  // ~
   XOR,                                    // ^
   ZERO_ID,                                // zero
@@ -276,7 +276,6 @@ public string type_to_string(Token|Type t) {
     "PLUS",
     "QUESTION",
     "SEMICOLON",
-    "SYMBOL_NAME",
     "TILDE",
     "XOR",
     "ZERO_ID",

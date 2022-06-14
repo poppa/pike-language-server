@@ -1261,21 +1261,21 @@ describe("Symbol names", lambda () {
   test("It should lex a simple symbol", lambda () {
     Lexer lexer = Lexer("my_symbol");
     Token t = lexer->lex();
-    expect(t->type)->to_equal(SYMBOL_NAME);
+    expect(t->type)->to_equal(IDENTIFIER);
     expect(t->value)->to_equal("my_symbol");
   });
 
   test("It should lex a simple symbol with leading underscore", lambda () {
     Lexer lexer = Lexer("_my_symbol");
     Token t = lexer->lex();
-    expect(t->type)->to_equal(SYMBOL_NAME);
+    expect(t->type)->to_equal(IDENTIFIER);
     expect(t->value)->to_equal("_my_symbol");
   });
 
   test("It should lex a simple symbol with leading dunderscore", lambda () {
     Lexer lexer = Lexer("__my_symbol");
     Token t = lexer->lex();
-    expect(t->type)->to_equal(SYMBOL_NAME);
+    expect(t->type)->to_equal(IDENTIFIER);
     expect(t->value)->to_equal("__my_symbol");
   });
 
@@ -1287,7 +1287,7 @@ describe("Symbol names", lambda () {
       toks += ({ t });
     }
 
-    expect(toks[0]->type)->to_equal(SYMBOL_NAME);
+    expect(toks[0]->type)->to_equal(IDENTIFIER);
     expect(toks[0]->value)->to_equal("`()");
     expect(toks[1]->type)->to_equal(PAREN_LEFT);
 
@@ -1298,7 +1298,7 @@ describe("Symbol names", lambda () {
       toks += ({ t });
     }
 
-    expect(toks[0]->type)->to_equal(SYMBOL_NAME);
+    expect(toks[0]->type)->to_equal(IDENTIFIER);
     expect(toks[0]->value)->to_equal("`^");
     expect(toks[1]->type)->to_equal(PAREN_LEFT);
     expect((mapping)toks[1]->location->start)
@@ -1365,7 +1365,7 @@ describe("Symbol names", lambda () {
   test("It should lex user defined getters and setters", lambda () {
     Token t;
     t = Lexer("`name(){}")->lex();
-    expect(t->type)->to_equal(SYMBOL_NAME);
+    expect(t->type)->to_equal(IDENTIFIER);
     expect(t->value)->to_equal("`name");
     t = Lexer("`name=(){}")->lex();
     expect(t->value)->to_equal("`name=");
@@ -1429,7 +1429,7 @@ describe("More complex stuff", lambda () {
     expect(tokens[1]->type)->to_equal(PAREN_LEFT);
     expect(tokens[2]->type)->to_equal(STRING_ID);
     expect(tokens[3]->type)->to_equal(PAREN_RIGHT);
-    expect(tokens[4]->type)->to_equal(SYMBOL_NAME);
+    expect(tokens[4]->type)->to_equal(IDENTIFIER);
     expect(tokens[5]->type)->to_equal(ASSIGN);
     expect(tokens[6]->type)->to_equal(ARRAY_START);
     expect(tokens[7]->type)->to_equal(STRING);
@@ -1457,19 +1457,19 @@ describe("More complex stuff", lambda () {
     expect(sizeof(tokens))->to_equal(21);
 
     expect(tokens[0]->type)->to_equal(CLASS);        // class
-    expect(tokens[1]->type)->to_equal(SYMBOL_NAME);  // MyClass
+    expect(tokens[1]->type)->to_equal(IDENTIFIER);  // MyClass
     expect(tokens[2]->type)->to_equal(CURLY_LEFT);   // {
     expect(tokens[3]->type)->to_equal(INHERIT);      // inherit
-    expect(tokens[4]->type)->to_equal(SYMBOL_NAME);  // Stdion
+    expect(tokens[4]->type)->to_equal(IDENTIFIER);  // Stdion
     expect(tokens[5]->type)->to_equal(DOT);          // .
-    expect(tokens[6]->type)->to_equal(SYMBOL_NAME);  // File
+    expect(tokens[6]->type)->to_equal(IDENTIFIER);  // File
     expect(tokens[7]->type)->to_equal(SEMICOLON);    // ;
     expect(tokens[8]->type)->to_equal(PROTECTED);    // protected
     expect(tokens[9]->type)->to_equal(FLOAT_ID);     // float
-    expect(tokens[10]->type)->to_equal(SYMBOL_NAME); // query
+    expect(tokens[10]->type)->to_equal(IDENTIFIER); // query
     expect(tokens[11]->type)->to_equal(PAREN_LEFT);  // (
     expect(tokens[12]->type)->to_equal(OBJECT_ID);   // object
-    expect(tokens[13]->type)->to_equal(SYMBOL_NAME); // in
+    expect(tokens[13]->type)->to_equal(IDENTIFIER); // in
     expect(tokens[14]->type)->to_equal(PAREN_RIGHT); // )
     expect(tokens[15]->type)->to_equal(CURLY_LEFT);  // {
     expect(tokens[16]->type)->to_equal(RETURN);      // return
@@ -1552,7 +1552,7 @@ describe("Preprocessor Macros", lambda () {
     expect(tokens[0]->type)->to_equal(MACRO_DIR);
     expect(tokens[1]->type)->to_equal(CONSTANT);
     expect(tokens[2]->type)->to_equal(PAREN_LEFT);
-    expect(tokens[3]->type)->to_equal(SYMBOL_NAME);
+    expect(tokens[3]->type)->to_equal(IDENTIFIER);
     expect(tokens[4]->type)->to_equal(PAREN_RIGHT);
   });
 

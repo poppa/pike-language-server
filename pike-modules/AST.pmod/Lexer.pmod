@@ -753,7 +753,7 @@ class Lexer {
           return make_simple_token(.Token.STATIC_ASSERT);
         }
 
-        return lex_symbol_name();
+        return lex_identifier();
       }
 
       case '%': {
@@ -780,11 +780,11 @@ class Lexer {
 
       default: {
         if (is_alpha(char)) {
-          if (.Token.Token t = lex_identifier()) {
+          if (.Token.Token t = lex_keyword_identifier()) {
             return t;
           }
 
-          return lex_symbol_name();
+          return lex_identifier();
         }
 
         if (is_digit(char)) {
@@ -834,7 +834,7 @@ class Lexer {
     return UNDEFINED;
   }
 
-  private .Token.Token lex_identifier() {
+  private .Token.Token lex_keyword_identifier() {
     [string word, function reset] = low_read_word();
 
     switch (word) {
@@ -1012,14 +1012,14 @@ class Lexer {
     return make_simple_token(t);
   }
 
-  private .Token.Token lex_symbol_name() {
+  private .Token.Token lex_identifier() {
     [string word, function reset] = low_read_word();
 
     if (!word || sizeof(word) < 1) {
       SYNTAX_ERROR("Unresolved symbol\n");
     }
 
-    return make_simple_token(.Token.SYMBOL_NAME);
+    return make_simple_token(.Token.IDENTIFIER);
   }
 
   private .Token.Token lex_preprocessor_directive() {
@@ -1076,7 +1076,7 @@ class Lexer {
 
       ASSERT_VALID_NEXT();
 
-      return make_simple_token(.Token.SYMBOL_NAME);
+      return make_simple_token(.Token.IDENTIFIER);
     }
 
     if (next_c == '(') {
@@ -1087,7 +1087,7 @@ class Lexer {
         SYNTAX_ERROR("Illegal ` identifier. Expected `()");
       }
 
-      return make_simple_token("`()", .Token.SYMBOL_NAME);
+      return make_simple_token("`()", .Token.IDENTIFIER);
     }
 
     while (int c = advance()) {
@@ -1101,7 +1101,7 @@ class Lexer {
         case '~': {
           current_string = sprintf("`%c", c);
           ASSERT_VALID_NEXT();
-          return make_simple_token(.Token.SYMBOL_NAME);
+          return make_simple_token(.Token.IDENTIFIER);
         }
 
         case '!': {
@@ -1112,7 +1112,7 @@ class Lexer {
           }
 
           ASSERT_VALID_NEXT();
-          return make_simple_token(.Token.SYMBOL_NAME);
+          return make_simple_token(.Token.IDENTIFIER);
         }
 
         case '*': {
@@ -1123,7 +1123,7 @@ class Lexer {
           }
 
           ASSERT_VALID_NEXT();
-          return make_simple_token(.Token.SYMBOL_NAME);
+          return make_simple_token(.Token.IDENTIFIER);
         }
 
         case '-': {
@@ -1138,7 +1138,7 @@ class Lexer {
           }
 
           ASSERT_VALID_NEXT();
-          return make_simple_token(.Token.SYMBOL_NAME);
+          return make_simple_token(.Token.IDENTIFIER);
         }
 
         case '<': {
@@ -1151,7 +1151,7 @@ class Lexer {
           }
 
           ASSERT_VALID_NEXT();
-          return make_simple_token(.Token.SYMBOL_NAME);
+          return make_simple_token(.Token.IDENTIFIER);
         }
 
         case '>': {
@@ -1164,7 +1164,7 @@ class Lexer {
           }
 
           ASSERT_VALID_NEXT();
-          return make_simple_token(.Token.SYMBOL_NAME);
+          return make_simple_token(.Token.IDENTIFIER);
         }
 
         case '=': {
@@ -1175,7 +1175,7 @@ class Lexer {
           }
 
           ASSERT_VALID_NEXT();
-          return make_simple_token(.Token.SYMBOL_NAME);
+          return make_simple_token(.Token.IDENTIFIER);
         }
 
         case '[': {
@@ -1199,7 +1199,7 @@ class Lexer {
           }
 
           ASSERT_VALID_NEXT();
-          return make_simple_token(.Token.SYMBOL_NAME);
+          return make_simple_token(.Token.IDENTIFIER);
         }
       }
     }
