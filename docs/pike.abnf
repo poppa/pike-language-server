@@ -12,8 +12,6 @@
 ; to generate errors for the real runtime and compiler.
 
 all = program
-    / program "end of file"
-
 program = program def
         / program ";"
         / ; empty
@@ -22,46 +20,27 @@ real_string_or_identifier = identifier
                           / real_string_constant
 
 optional_rename_inherit = ":" real_string_or_identifier
-                        / ":" bad_identifier
-                        / ":" error
                         / ; empty
 
-low_program_ref = safe_expr0
+low_program_ref = expr0
 inherit_ref = low_program_ref
 inheritance = modifiers "inherit" inherit_ref optional_rename_inherit ";"
 import = "import" constant_expr ";"
-constant_name = identifier "=" safe_expr0
-              / bad_identifier "=" safe_expr0
-              / error "=" safe_expr0
+constant_name = identifier "=" expr0
 constant_list = constant_name
               / constant_list "," constant_name
 constant = modifiers "constant" constant_list ";"
 block_or_semi = block
               / ";"
               / "end of file"
-
-open_paren_or_safe_apply = "("
-                         / "(?"
-close_paren_or_missing = ")"
-                       / ; empty
-close_brace_or_missing = "}"
-                       / ; empty
-close_brace_or_eof = "}"
-                   ; FIXME: I think this is just for error handling in the C
-                   ; source
-                   / "end of file"
-close_bracket_or_missing = "]"
-                         / ; empty
-
 start_function = ; empty
 optional_constant = ; empty
                   / "constant"
 
 ; FIXME: These "identifiers" should probably not be quoted
-def = modifiers optional_attributes simple_type optional_constant identifier start_function "(" arguments close_paren_or_missing block_or_semi
-    / modifiers optional_attributes simple_type optional_constant identifier start_function error
-    / modifiers optional_attributes simple_type optional_constant bad_identifier "(" arguments ")" block_or_semi
+def = modifiers optional_attributes simple_type optional_constant identifier start_function "(" arguments ")" block_or_semi
     / modifiers optional_attributes simple_type optional_constant name_list ";"
+    / modifiers "{" program "}"
     / inheritance
     / import
     / constant
@@ -69,29 +48,21 @@ def = modifiers optional_attributes simple_type optional_constant identifier sta
     / modifiers enum
     / annotation ";"
     ; Should constant really be quoted here?
-    / "@" "constant" ";"
+    / "@" constant ";"
     / typedef
-    / static_assertion expected_semicolon
-    / error "end of file"
-    / error ";"
-    / error "}"
-    / modifiers "{" program close_brace_or_eof
+    / static_assertion ";"
 
 static_assertion = "_Static_assert" "(" expr0 "," expr0 ")"
 
 optional_dot_dot_dot = "..."
-                     ; FIXME: I think this is just for error handling in the C
-                     ; source
-                     / ".."
                      / ; empty
 
 optional_identifier = identifier
-                    / bad_identifier
                     / ; empty
 
 new_arg_name = full_type optional_dot_dot_dot optional_identifier
 
-func_args = "(" arguments close_paren_or_missing
+func_args = "(" arguments ")"
 
 arguments = optional_comma
           / arguments2 optional_comma
@@ -173,7 +144,6 @@ magic_identifiers = magic_identifiers1
                   / magic_identifiers2
                   / magic_identifiers3
 
-; FIXME: Quotes?!
 magic_identifier = identifier
                  / "reserved identifier"
                  / magic_identifiers
@@ -291,67 +261,35 @@ opt_mapping_type = "(" full_type ":" full_type ")"
 
 name_list = new_name
           / name_list "," new_name
-
 new_name = identifier
-         / bad_identifier
-
-new_name = identifier "=" expr0
-         / identifier "=" error
-         / identifier "=" "end of file"
-         / bad_identifier "=" expr0
-
+         /  identifier "=" expr0
 new_local_name = identifier
-               / bad_identifier
+               / identifier "=" expr0
 
-new_local_name = identifier "=" expr0
-               / bad_identifier "=" expr0
-               / identifier "=" error
-               / identifier "=" "end of file"
-
-= ; empty
-
-block = "{" statements end_block
-
-end_block = "}"
-          / "end of file"
-
-failsafe_block = block
-               / error
-               / "end of file"
+block = "{" statements "}"
 
 local_name_list = new_local_name
                 / local_name_list "," new_local_name
 
-constant_expr = safe_expr0
+constant_expr = expr0
 
-local_constant_name = identifier "=" safe_expr0
-                    / bad_identifier "=" safe_expr0
-                    / error "=" safe_expr0
-
+local_constant_name = identifier "=" expr0
 local_constant_list = local_constant_name
                     / local_constant_list "," local_constant_name
 
 local_constant = "constant" local_constant_list ";"
-               / "constant" error ";"
-               / "constant" error "end of file"
-               / "constant" error "}"
-
 statements = ; empty
            / statements statement
 
-statement_with_semicolon = unused2 expected_semicolon
-
+statement_with_semicolon = unused2 ";"
 normal_label_statement = statement_with_semicolon
                        / import
                        / cond
                        / return
                        / local_constant
                        / block
-                       / break expected_semicolon
-                       / continue expected_semicolon
-                       / error ";"
-                       / error "end of file"
-                       / error "}"
+                       / break ";"
+                       / continue ";"
                        / ";"
 
 statement = normal_label_statement
@@ -393,8 +331,6 @@ local_generator = identifier start_function func_args failsafe_block
                 / identifier start_function error
 
 create_arg = modifiers simple_type optional_dot_dot_dot identifier
-           / modifiers simple_type bad_identifier
-
 create_arguments2 = create_arg
                   / create_arguments2 "," create_arg
                   / create_arguments2 ":" create_arg
@@ -405,104 +341,54 @@ create_arguments = optional_comma
 optional_create_arguments = ; empty
                           / "(" create_arguments close_paren_or_missing
 
-failsafe_program = "{" program end_block
-                 / error
-                 / "end of file"
-
-anon_class = "class" optional_create_arguments failsafe_program
-
-named_class = "class" simple_identifier optional_create_arguments failsafe_program
-
-simple_identifier = identifier
-                  / bad_identifier
+program_block = "{" program "}"
+anon_class = "class" optional_create_arguments program_block
+named_class = "class" identifier optional_create_arguments program_block
 
 enum_value = ; empty
-           / "=" safe_expr0
-
+           / "=" expr0
 enum_def = ; empty
-         / simple_identifier enum_value
-
-propagated_enum_value = ; empty
-
+         / identifier enum_value
 enum_list = enum_def
-          / enum_list "," propagated_enum_value enum_def
-          / error
+          / enum_list "," enum_def
+enum = "enum" optional_identifier "{" enum_list "}"
+typedef = modifiers "typedef" full_type identifier ";"
 
-
-enum = "enum" optional_identifier "{" enum_list end_block
-
-typedef = modifiers "typedef" full_type simple_identifier ";"
-
-save_locals = ; empty
-
-save_block_level = ; empty
-
-cond = "if" save_block_level save_locals "(" safe_comma_expr end_cond statement optional_else_part
-
-end_cond = ")"
-         / "}"
-         / "end of file"
-
+cond = "if" "(" comma_expr ")" statement optional_else_part
 optional_else_part = ; empty
                    / "else" statement
 
-safe_lvalue = lvalue
-            / error
-
-safe_expr0 = expr0
-           / "end of file"
-           / error
-
 foreach_optional_lvalue = ; empty */
-                        / safe_lvalue
-
-foreach_lvalues = "," safe_lvalue
+                        / lvalue
+foreach_lvalues = "," lvalue
                 / ";" foreach_optional_lvalue ";" foreach_optional_lvalue
-
-foreach = "foreach" save_block_level save_locals "(" expr0 foreach_lvalues end_cond statement
-
-do = "do" statement "while" "(" safe_comma_expr end_cond expected_semicolon
-   / "do" statement "while" "end of file"
-   / "do" statement "end of file"
-
-expected_semicolon = ";"
-                   / "end of file"
-
-for = "for" save_block_level save_locals "(" unused expected_semicolon for_expr expected_semicolon unused end_cond statement
-
-while = "while" save_block_level save_locals "(" safe_comma_expr end_cond statement
+foreach = "foreach" "(" expr0 foreach_lvalues ")" statement
+do = "do" statement "while" "(" comma_expr ")" ";"
+for = "for" "(" unused ";" for_expr ";" unused ")" statement
+while = "while" "(" comma_expr ")" statement
 
 for_expr = ; empty
-         / safe_comma_expr
+         / comma_expr
 
-switch = "switch" save_block_level save_locals "(" safe_comma_expr end_cond statement
+switch = "switch" "(" comma_expr ")" statement
 
-case = "case" safe_comma_expr expected_colon
-     / "case" safe_comma_expr expected_dot_dot optional_comma_expr expected_colon
-     / "case" expected_dot_dot safe_comma_expr expected_colon
-
-expected_colon = ":"
-               / ";"
-               / "}"
-               / "end of file"
+case = "case" comma_expr ":"
+     / "case" comma_expr expected_dot_dot optional_comma_expr ":"
+     / "case" expected_dot_dot comma_expr ":"
 
 optional_continue = ; empty
                   / "continue"
                   / "break"
-
-return = optional_continue "return" expected_semicolon
-       / optional_continue "return" safe_comma_expr expected_semicolon
+return = optional_continue "return" ";"
+       / optional_continue "return" comma_expr ";"
 
 unused = ; empty
-       / safe_comma_expr
+       / comma_expr
 
 unused2 = comma_expr
 
 optional_comma_expr = ; empty
-                    / safe_comma_expr
-
-safe_comma_expr = comma_expr
-                / error
+                    / comma_expr
 
 comma_expr = comma_expr2
            / simple_type2 local_name_list
@@ -515,9 +401,7 @@ splice_expr = expr0
 
 expr0 = expr01
       / expr4 assign expr0
-      / expr4 assign error
       / "[" low_lvalue_list "]" assign expr0
-      / "[" low_lvalue_list "]" error
 
 expr01 = expr1
        / expr1 "?" expr01 ":" expr01
@@ -550,10 +434,8 @@ m_expr_list = ; empty
 
 m_expr_list2 = assoc_pair
              / m_expr_list2 "," assoc_pair
-             / m_expr_list2 "," error
 
-assoc_pair = expr0 expected_colon expr0
-           / expr0 expected_colon error
+assoc_pair = expr0 ":" expr0
 
 expr1 = expr2
       / expr1 "||" expr1
@@ -608,21 +490,14 @@ expr3 = expr4
       / expr4 "--"
 
 optional_block = ; empty
-               / "{" start_lambda statements end_block
+               / "{" start_lambda statements "}"
 
 apply = expr4 "(" expr_list ")" optional_block
       / expr4 "(?" expr_list ")" optional_block
-      / expr4 open_paren_or_safe_apply error ")" optional_block
-      / expr4 open_paren_or_safe_apply error "end of file"
-      / expr4 open_paren_or_safe_apply error ";"
-      / expr4 open_paren_or_safe_apply error "}"
-
-implicit_modifiers = ; empty
 
 expr4 = idents
       / expr5
-      / expr5 "." line_number_info identifier
-      / bad_expr_ident
+      / expr5 "." identifier
 
 expr5 = literal_expr
       / catch
@@ -631,33 +506,23 @@ expr5 = literal_expr
       / sscanf
       / static_assertion
       / lambda
-      / implicit_modifiers anon_class
-      / implicit_modifiers enum
+      / anon_class
+      / enum
       / apply
       / expr4 "[" "*" "]"
       / expr4 "[" expr0 "]"
       / expr4 "[" range_bound expected_dot_dot range_bound "]"
       / expr4 "[?" expr0 "]"
       / expr4 "[?" range_bound expected_dot_dot range_bound "]"
-      / expr4 "[" error "]"
-      / expr4 "[" error "end of file"
-      / expr4 "[" error ";"
-      / expr4 "[" error "}"
-      / expr4 "[" error ")"
       / "(" comma_expr2 ")"
-      / "(" error ")"
-      / "(" error "end of file"
-      / "(" error ";"
-      / "(" error "}"
       / expr4 "->" magic_identifier
       / expr4 "->?" identifier
-      / expr4 "->" error
 
 literal_expr = string
              / "integer literal"
              / "float literal"
-             / "(" "{" expr_list close_brace_or_missing ")"
-             / "(" "[" m_expr_list close_bracket_or_missing ")"
+             / "({" expr_list "})"
+             / "([" m_expr_list "])"
              / "(<" expr_list ">)"
              / "(<" expr_list ")"
              / "(<" error ">)"
@@ -668,11 +533,9 @@ literal_expr = string
 
 unqualified_idents = low_idents
                    / unqualified_idents "." identifier
-                   / unqualified_idents "." bad_identifier
 
 qualified_idents = qualified_ident
                  / qualified_idents "." identifier
-                 / qualified_idents "." bad_identifier
 
 idents = unqualified_idents
        / qualified_idents
@@ -685,7 +548,6 @@ inherit_specifier = string_or_identifier "::"
                  / "global" "::"
                  / inherit_specifier "local" "::"
                  / inherit_specifier identifier "::"
-                 / inherit_specifier bad_inherit "::"
 
 low_idents = identifier
            / "." identifier
@@ -693,53 +555,23 @@ low_idents = identifier
            / "reserved identifier"
 
 qualified_ident = "predef" "::" identifier
-                / "predef" "::" bad_identifier
                 / "version prefix" "::" identifier
-                / "version prefix" "::" bad_identifier
                 / inherit_specifier identifier
-                / inherit_specifier bad_identifier
-                / inherit_specifier error
                 / "::" identifier
-                / "::" bad_identifier
 
 range_bound = ; empty
            / comma_expr
            / "<" comma_expr
-           / "end of file"
-           / "<" "end of file"
 
 gauge = "gauge" catch_arg
 
 typeof = "typeof" "(" expr0 ")"
-       / "typeof" "(" error ")"
-       / "typeof" "(" error "}"
-       / "typeof" "(" error "end of file"
-       / "typeof" "(" error ";"
-
 catch_arg = "(" comma_expr ")"
-          / "(" error ")"
-          / "(" error "end of file"
-          / "(" error "}"
-          / "(" error ";"
           / block
-          / error
 
 catch = "catch" catch_arg
 
 sscanf = "sscanf" "(" expr0 "," expr0 lvalue_list ")"
-       / "sscanf" "(" expr0 "," expr0 error ")"
-       / "sscanf" "(" expr0 "," expr0 error "end of file"
-       / "sscanf" "(" expr0 "," expr0 error "}"
-       / "sscanf" "(" expr0 "," expr0 error ";"
-       / "sscanf" "(" expr0 error ")"
-       / "sscanf" "(" expr0 error "end of file"
-       / "sscanf" "(" expr0 error "}"
-       / "sscanf" "(" expr0 error ";"
-       / "sscanf" "(" error ")"
-       / "sscanf" "(" error "end of file"
-       / "sscanf" "(" error "}"
-       / "sscanf" "(" error ";"
-
 lvalue = expr4
        / "[" low_lvalue_list "]"
        / type2 identifier
@@ -761,9 +593,6 @@ string_constant = string
 real_string_constant = "string literal"
                      / real_string_constant "string literal"
                      / real_string_constant "+" "string literal"
-
-bad_identifier = bad_inherit
-               / "local"
 
 bad_inherit = bad_expr_ident
             / "array"
