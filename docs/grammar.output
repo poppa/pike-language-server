@@ -1,0 +1,902 @@
+NOTE! This is taken from the Pike source and is the generated grammar which
+      is generated from `language.yacc`. This is the reference for "pike.abnf"
+
+Grammar
+
+    0 $accept: all $end
+
+    1 all: program
+    2    | program "end of file"
+
+    3 program: program def
+    4        | program ';'
+    5        | /* empty */
+
+    6 real_string_or_identifier: "identifier"
+    7                          | real_string_constant
+
+    8 optional_rename_inherit: ':' real_string_or_identifier
+    9                        | ':' bad_identifier
+   10                        | ':' error
+   11                        | /* empty */
+
+   12 low_program_ref: safe_expr0
+
+   13 @1: /* empty */
+
+   14 inherit_ref: @1 low_program_ref
+
+   15 inheritance: modifiers "inherit" inherit_ref optional_rename_inherit ';'
+   16            | modifiers "inherit" inherit_ref error ';'
+   17            | modifiers "inherit" inherit_ref error "end of file"
+   18            | modifiers "inherit" inherit_ref error '}'
+
+   19 import: "import" constant_expr ';'
+
+   20 constant_name: "identifier" '=' safe_expr0
+   21              | bad_identifier '=' safe_expr0
+   22              | error '=' safe_expr0
+
+   23 constant_list: constant_name
+   24              | constant_list ',' constant_name
+
+   25 constant: modifiers "constant" constant_list ';'
+   26         | modifiers "constant" error ';'
+   27         | modifiers "constant" error "end of file"
+   28         | modifiers "constant" error '}'
+
+   29 block_or_semi: block
+   30              | ';'
+   31              | "end of file"
+   32              | error
+
+   33 open_paren_with_line_info: '('
+
+   34 safe_apply_with_line_info: "(?"
+
+   35 open_paren_or_safe_apply_with_line_info: open_paren_with_line_info
+   36                                        | safe_apply_with_line_info
+
+   37 close_paren_or_missing: ')'
+   38                       | /* empty */
+
+   39 close_brace_or_missing: '}'
+   40                       | /* empty */
+
+   41 close_brace_or_eof: '}'
+   42                   | "end of file"
+
+   43 open_bracket_with_line_info: '['
+
+   44 close_bracket_or_missing: ']'
+   45                         | /* empty */
+
+   46 start_function: /* empty */
+
+   47 optional_constant: /* empty */
+   48                  | "constant"
+
+   49 @2: /* empty */
+
+   50 @3: /* empty */
+
+   51 def: modifiers optional_attributes simple_type optional_constant "identifier" start_function '(' @2 arguments close_paren_or_missing @3 block_or_semi
+   52    | modifiers optional_attributes simple_type optional_constant "identifier" start_function error
+
+   53 @4: /* empty */
+
+   54 def: modifiers optional_attributes simple_type optional_constant bad_identifier @4 '(' arguments ')' block_or_semi
+   55    | modifiers optional_attributes simple_type optional_constant name_list ';'
+   56    | inheritance
+   57    | import
+   58    | constant
+   59    | modifiers named_class
+   60    | modifiers enum
+   61    | annotation ';'
+   62    | '@' "constant" ';'
+   63    | typedef
+   64    | static_assertion expected_semicolon
+   65    | error "end of file"
+   66    | error ';'
+   67    | error '}'
+
+   68 @5: /* empty */
+
+   69 def: modifiers '{' @5 program close_brace_or_eof
+
+   70 static_assertion: "_Static_assert" '(' expr0 ',' expr0 ')'
+
+   71 optional_dot_dot_dot: "..."
+   72                     | ".."
+   73                     | /* empty */
+
+   74 optional_identifier: "identifier"
+   75                    | bad_identifier
+   76                    | /* empty */
+
+   77 new_arg_name: full_type optional_dot_dot_dot optional_identifier
+
+   78 func_args: '(' arguments close_paren_or_missing
+
+   79 arguments: optional_comma
+   80          | arguments2 optional_comma
+
+   81 arguments2: new_arg_name
+   82           | arguments2 ',' new_arg_name
+   83           | arguments2 ':' new_arg_name
+
+   84 modifier: "final"
+   85         | "static"
+   86         | "extern"
+   87         | "optional"
+   88         | "private"
+   89         | "local"
+   90         | "public"
+   91         | "protected"
+   92         | "inline"
+   93         | "variant"
+   94         | "__weak__"
+   95         | "continue"
+   96         | "__unused__"
+
+   97 magic_identifiers1: "final"
+   98                   | "static"
+   99                   | "extern"
+  100                   | "private"
+  101                   | "local"
+  102                   | "public"
+  103                   | "protected"
+  104                   | "inline"
+  105                   | "optional"
+  106                   | "variant"
+  107                   | "__weak__"
+  108                   | "__unused__"
+  109                   | "_Static_assert"
+
+  110 magic_identifiers2: "void"
+  111                   | "mixed"
+  112                   | "array"
+  113                   | "__attribute__"
+  114                   | "__deprecated__"
+  115                   | "mapping"
+  116                   | "multiset"
+  117                   | "object"
+  118                   | "function"
+  119                   | "__func__"
+  120                   | "program"
+  121                   | "string"
+  122                   | "float"
+  123                   | "int"
+  124                   | "enum"
+  125                   | "typedef"
+
+  126 magic_identifiers3: "if"
+  127                   | "do"
+  128                   | "for"
+  129                   | "while"
+  130                   | "else"
+  131                   | "foreach"
+  132                   | "catch"
+  133                   | "gauge"
+  134                   | "class"
+  135                   | "break"
+  136                   | "case"
+  137                   | "constant"
+  138                   | "continue"
+  139                   | "default"
+  140                   | "import"
+  141                   | "inherit"
+  142                   | "lambda"
+  143                   | "predef"
+  144                   | "return"
+  145                   | "sscanf"
+  146                   | "switch"
+  147                   | "typeof"
+  148                   | "global"
+
+  149 magic_identifiers: magic_identifiers1
+  150                  | magic_identifiers2
+  151                  | magic_identifiers3
+
+  152 magic_identifier: "identifier"
+  153                 | "reserved identifier"
+  154                 | magic_identifiers
+
+  155 annotation: '@' constant_expr
+
+  156 annotation_list: /* empty */
+  157                | annotation ':' annotation_list
+
+  158 modifiers: annotation_list modifier_list
+
+  159 modifier_list: /* empty */
+  160              | modifier_list modifier
+
+  161 attribute: "__attribute__" '(' string_constant optional_comma ')'
+  162          | "__deprecated__" '(' ')'
+  163          | "__deprecated__"
+
+  164 optional_attributes: /* empty */
+  165                    | optional_attributes attribute
+
+  166 cast: open_paren_with_line_info type ')'
+
+  167 soft_cast: open_bracket_with_line_info type ']'
+
+  168 type2: type
+  169      | identifier_type
+
+  170 simple_type: full_type
+
+  171 simple_type2: type2
+
+  172 full_type: full_type '|' type3
+  173          | type3
+
+  174 type: type '|' type3
+  175     | basic_type
+
+  176 type3: basic_type
+  177      | identifier_type
+
+  178 basic_type: "float"
+  179           | "void"
+  180           | "mixed"
+  181           | "auto"
+  182           | "string" opt_string_width
+  183           | "int" opt_int_range
+  184           | "mapping" opt_mapping_type
+  185           | "function" opt_function_type
+  186           | "object" opt_program_type
+  187           | "program" opt_program_type
+  188           | "array" opt_array_type
+  189           | "multiset" opt_multiset_type
+  190           | "__attribute__" '(' string_constant ',' full_type ')'
+  191           | "__attribute__" '(' string_constant error ')'
+  192           | "__attribute__" error
+  193           | "__deprecated__" '(' full_type ')'
+  194           | "__deprecated__" '(' error ')'
+
+  195 identifier_type: idents
+  196                | typeof
+
+  197 number: "integer literal"
+  198       | '-' "integer literal"
+
+  199 number_or_maxint: /* empty */
+  200                 | number
+
+  201 number_or_minint: /* empty */
+  202                 | number
+
+  203 expected_dot_dot: ".."
+  204                 | "..."
+
+  205 safe_int_range_type: "bits"
+  206                    | number_or_minint expected_dot_dot number_or_maxint
+  207                    | number
+  208                    | error
+
+  209 opt_int_range: /* empty */
+  210              | '(' safe_int_range_type ')'
+
+  211 opt_string_width: opt_int_range
+  212                 | '(' safe_int_range_type ':' safe_int_range_type ')'
+  213                 | '(' safe_int_range_type ':' ')'
+  214                 | '(' ':' safe_int_range_type ')'
+
+  215 opt_program_type: /* empty */
+  216                 | '(' full_type ')'
+  217                 | '(' string_constant ')'
+  218                 | '(' error ')'
+
+  219 @6: /* empty */
+
+  220 @7: /* empty */
+
+  221 opt_function_type: '(' @6 function_type_list optional_dot_dot_dot ':' @7 full_type ')'
+  222                  | /* empty */
+
+  223 function_type_list: optional_comma
+  224                   | function_type_list2 optional_comma
+
+  225 function_type_list2: full_type
+
+  226 @8: /* empty */
+
+  227 function_type_list2: function_type_list2 ',' @8 full_type
+
+  228 opt_multiset_type: '(' full_type ')'
+  229                  | /* empty */
+
+  230 opt_array_type: '(' full_type ')'
+  231               | /* empty */
+  232               | '(' safe_int_range_type ':' full_type ')'
+  233               | '(' ':' full_type ')'
+  234               | '(' safe_int_range_type ':' ')'
+
+  235 @9: /* empty */
+
+  236 @10: /* empty */
+
+  237 @11: /* empty */
+
+  238 opt_mapping_type: '(' @9 full_type ':' @10 full_type @11 ')'
+  239                 | /* empty */
+
+  240 name_list: new_name
+  241          | name_list ',' new_name
+
+  242 new_name: "identifier"
+  243         | bad_identifier
+
+  244 @12: /* empty */
+
+  245 new_name: "identifier" '=' @12 expr0
+  246         | "identifier" '=' error
+  247         | "identifier" '=' "end of file"
+  248         | bad_identifier '=' expr0
+
+  249 new_local_name: "identifier"
+  250               | bad_identifier
+
+  251 @13: /* empty */
+
+  252 new_local_name: "identifier" '=' @13 expr0
+
+  253 @14: /* empty */
+
+  254 new_local_name: bad_identifier '=' @14 expr0
+
+  255 @15: /* empty */
+
+  256 new_local_name: "identifier" '=' @15 error
+
+  257 @16: /* empty */
+
+  258 new_local_name: "identifier" '=' @16 "end of file"
+
+  259 line_number_info: /* empty */
+
+  260 @17: /* empty */
+
+  261 @18: /* empty */
+
+  262 @19: /* empty */
+
+  263 block: '{' @17 line_number_info @18 @19 statements end_block
+
+  264 end_block: '}'
+  265          | "end of file"
+
+  266 failsafe_block: block
+  267               | error
+  268               | "end of file"
+
+  269 local_name_list: new_local_name
+  270                | local_name_list ',' new_local_name
+
+  271 constant_expr: safe_expr0
+
+  272 local_constant_name: "identifier" '=' safe_expr0
+  273                    | bad_identifier '=' safe_expr0
+  274                    | error '=' safe_expr0
+
+  275 local_constant_list: local_constant_name
+  276                    | local_constant_list ',' local_constant_name
+
+  277 local_constant: "constant" local_constant_list ';'
+  278               | "constant" error ';'
+  279               | "constant" error "end of file"
+  280               | "constant" error '}'
+
+  281 statements: /* empty */
+  282           | statements statement
+
+  283 statement_with_semicolon: unused2 expected_semicolon
+
+  284 normal_label_statement: statement_with_semicolon
+  285                       | import
+  286                       | cond
+  287                       | return
+  288                       | local_constant
+  289                       | block
+  290                       | break expected_semicolon
+  291                       | continue expected_semicolon
+  292                       | error ';'
+  293                       | error "end of file"
+  294                       | error '}'
+  295                       | ';'
+
+  296 statement: normal_label_statement
+  297          | while
+  298          | do
+  299          | for
+  300          | foreach
+  301          | switch
+  302          | case
+  303          | default
+  304          | labeled_statement
+  305          | simple_type2 local_function
+  306          | "continue" simple_type2 local_generator
+  307          | implicit_modifiers named_class
+
+  308 @20: /* empty */
+
+  309 labeled_statement: "identifier" @20 ':' statement
+
+  310 optional_label: "identifier"
+  311               | /* empty */
+
+  312 break: "break" optional_label
+
+  313 default: "default" ':'
+  314        | "default"
+
+  315 continue: "continue" optional_label
+
+  316 start_lambda: /* empty */
+
+  317 implicit_identifier: /* empty */
+
+  318 @21: /* empty */
+
+  319 lambda: "lambda" line_number_info implicit_identifier start_lambda func_args @21 failsafe_block
+  320       | "lambda" line_number_info implicit_identifier start_lambda error
+
+  321 @22: /* empty */
+
+  322 local_function: "identifier" start_function func_args @22 failsafe_block
+  323               | "identifier" start_function error
+
+  324 @23: /* empty */
+
+  325 local_generator: "identifier" start_function func_args @23 failsafe_block
+  326                | "identifier" start_function error
+
+  327 create_arg: modifiers simple_type optional_dot_dot_dot "identifier"
+  328           | modifiers simple_type bad_identifier
+
+  329 create_arguments2: create_arg
+  330                  | create_arguments2 ',' create_arg
+  331                  | create_arguments2 ':' create_arg
+
+  332 create_arguments: optional_comma
+  333                 | create_arguments2 optional_comma
+
+  334 optional_create_arguments: /* empty */
+  335                          | '(' create_arguments close_paren_or_missing
+
+  336 @24: /* empty */
+
+  337 failsafe_program: '{' program @24 end_block
+  338                 | error
+  339                 | "end of file"
+
+  340 @25: /* empty */
+
+  341 @26: /* empty */
+
+  342 @27: /* empty */
+
+  343 anon_class: "class" line_number_info @25 @26 @27 optional_create_arguments failsafe_program
+
+  344 @28: /* empty */
+
+  345 @29: /* empty */
+
+  346 named_class: "class" line_number_info simple_identifier @28 @29 optional_create_arguments failsafe_program
+
+  347 simple_identifier: "identifier"
+  348                  | bad_identifier
+
+  349 enum_value: /* empty */
+  350           | '=' safe_expr0
+
+  351 enum_def: /* empty */
+  352         | simple_identifier enum_value
+
+  353 propagated_enum_value: /* empty */
+
+  354 enum_list: enum_def
+  355          | enum_list ',' propagated_enum_value enum_def
+  356          | error
+
+  357 @30: /* empty */
+
+  358 @31: /* empty */
+
+  359 @32: /* empty */
+
+  360 enum: "enum" @30 optional_identifier '{' @31 enum_list @32 end_block
+
+  361 typedef: modifiers "typedef" full_type simple_identifier ';'
+
+  362 save_locals: /* empty */
+
+  363 save_block_level: /* empty */
+
+  364 cond: "if" save_block_level save_locals line_number_info '(' safe_comma_expr end_cond statement optional_else_part
+
+  365 end_cond: ')'
+  366         | '}'
+  367         | "end of file"
+
+  368 optional_else_part: /* empty */
+  369                   | "else" statement
+
+  370 safe_lvalue: lvalue
+  371            | error
+
+  372 safe_expr0: expr0
+  373           | "end of file"
+  374           | error
+
+  375 foreach_optional_lvalue: /* empty */
+  376                        | safe_lvalue
+
+  377 foreach_lvalues: ',' safe_lvalue
+  378                | ';' foreach_optional_lvalue ';' foreach_optional_lvalue
+
+  379 @33: /* empty */
+
+  380 foreach: "foreach" save_block_level save_locals line_number_info '(' expr0 foreach_lvalues end_cond @33 statement
+
+  381 do: "do" line_number_info statement "while" '(' safe_comma_expr end_cond expected_semicolon
+  382   | "do" line_number_info statement "while" "end of file"
+  383   | "do" line_number_info statement "end of file"
+
+  384 expected_semicolon: ';'
+  385                   | "end of file"
+
+  386 for: "for" save_block_level save_locals line_number_info '(' unused expected_semicolon for_expr expected_semicolon unused end_cond statement
+
+  387 while: "while" save_block_level save_locals line_number_info '(' safe_comma_expr end_cond statement
+
+  388 for_expr: /* empty */
+  389         | safe_comma_expr
+
+  390 switch: "switch" save_block_level save_locals line_number_info '(' safe_comma_expr end_cond statement
+
+  391 case: "case" safe_comma_expr expected_colon
+  392     | "case" safe_comma_expr expected_dot_dot optional_comma_expr expected_colon
+  393     | "case" expected_dot_dot safe_comma_expr expected_colon
+
+  394 expected_colon: ':'
+  395               | ';'
+  396               | '}'
+  397               | "end of file"
+
+  398 optional_continue: /* empty */
+  399                  | "continue"
+  400                  | "break"
+
+  401 return: optional_continue "return" expected_semicolon
+  402       | optional_continue "return" safe_comma_expr expected_semicolon
+
+  403 unused: /* empty */
+  404       | safe_comma_expr
+
+  405 unused2: comma_expr
+
+  406 optional_comma_expr: /* empty */
+  407                    | safe_comma_expr
+
+  408 safe_comma_expr: comma_expr
+  409                | error
+
+  410 comma_expr: comma_expr2
+  411           | simple_type2 local_name_list
+
+  412 comma_expr2: expr0
+  413            | comma_expr2 ',' expr0
+
+  414 splice_expr: expr0
+  415            | '@' expr0
+
+  416 expr0: expr01
+  417      | expr4 assign expr0
+  418      | expr4 assign error
+  419      | open_bracket_with_line_info low_lvalue_list ']' assign expr0
+  420      | open_bracket_with_line_info low_lvalue_list ']' error
+
+  421 expr01: expr1
+  422       | expr1 '?' expr01 ':' expr01
+
+  423 assign: '='
+  424       | "&="
+  425       | "|="
+  426       | "^="
+  427       | "<<="
+  428       | ">>="
+  429       | "+="
+  430       | "-="
+  431       | "*="
+  432       | "**="
+  433       | "%="
+  434       | "/="
+  435       | "?="
+
+  436 optional_comma: /* empty */
+  437               | ','
+
+  438 expr_list: /* empty */
+  439          | expr_list2 optional_comma
+
+  440 expr_list2: splice_expr
+  441           | expr_list2 ',' splice_expr
+
+  442 m_expr_list: /* empty */
+  443            | m_expr_list2 optional_comma
+
+  444 m_expr_list2: assoc_pair
+  445             | m_expr_list2 ',' assoc_pair
+  446             | m_expr_list2 ',' error
+
+  447 assoc_pair: expr0 expected_colon expr0
+  448           | expr0 expected_colon error
+
+  449 expr1: expr2
+  450      | expr1 "||" expr1
+  451      | expr1 "&&" expr1
+  452      | expr1 '|' expr1
+  453      | expr1 '^' expr1
+  454      | expr1 '&' expr1
+  455      | expr1 "==" expr1
+  456      | expr1 "!=" expr1
+  457      | expr1 '>' expr1
+  458      | expr1 ">=" expr1
+  459      | expr1 '<' expr1
+  460      | expr1 "<=" expr1
+  461      | expr1 "<<" expr1
+  462      | expr1 ">>" expr1
+  463      | expr1 '+' expr1
+  464      | expr1 '-' expr1
+  465      | expr1 '*' expr1
+  466      | expr1 "**" expr1
+  467      | expr1 '%' expr1
+  468      | expr1 '/' expr1
+  469      | expr1 "||" error
+  470      | expr1 "&&" error
+  471      | expr1 '|' error
+  472      | expr1 '^' error
+  473      | expr1 '&' error
+  474      | expr1 "==" error
+  475      | expr1 "!=" error
+  476      | expr1 '>' error
+  477      | expr1 ">=" error
+  478      | expr1 '<' error
+  479      | expr1 "<=" error
+  480      | expr1 "<<" error
+  481      | expr1 ">>" error
+  482      | expr1 '+' error
+  483      | expr1 '-' error
+  484      | expr1 '*' error
+  485      | expr1 '%' error
+  486      | expr1 '/' error
+
+  487 expr2: expr3
+  488      | cast expr2
+  489      | soft_cast expr2
+  490      | "++" expr4
+  491      | "--" expr4
+  492      | "!" expr2
+  493      | '~' expr2
+  494      | '-' expr2
+
+  495 expr3: expr4
+  496      | expr4 "++"
+  497      | expr4 "--"
+
+  498 optional_block: /* empty */
+
+  499 @34: /* empty */
+
+  500 optional_block: '{' line_number_info start_lambda @34 statements end_block
+
+  501 apply: expr4 open_paren_with_line_info expr_list ')' optional_block
+  502      | expr4 safe_apply_with_line_info expr_list ')' optional_block
+  503      | expr4 open_paren_or_safe_apply_with_line_info error ')' optional_block
+  504      | expr4 open_paren_or_safe_apply_with_line_info error "end of file"
+  505      | expr4 open_paren_or_safe_apply_with_line_info error ';'
+  506      | expr4 open_paren_or_safe_apply_with_line_info error '}'
+
+  507 implicit_modifiers: /* empty */
+
+  508 expr4: idents
+  509      | expr5
+  510      | expr5 '.' line_number_info "identifier"
+  511      | bad_expr_ident
+
+  512 expr5: literal_expr
+  513      | catch
+  514      | gauge
+  515      | typeof
+  516      | sscanf
+  517      | static_assertion
+  518      | lambda
+  519      | implicit_modifiers anon_class
+  520      | implicit_modifiers enum
+  521      | apply
+  522      | expr4 open_bracket_with_line_info '*' ']'
+  523      | expr4 open_bracket_with_line_info expr0 ']'
+  524      | expr4 open_bracket_with_line_info range_bound expected_dot_dot range_bound ']'
+  525      | expr4 "[?" line_number_info expr0 ']'
+  526      | expr4 "[?" line_number_info range_bound expected_dot_dot range_bound ']'
+  527      | expr4 open_bracket_with_line_info error ']'
+  528      | expr4 open_bracket_with_line_info error "end of file"
+  529      | expr4 open_bracket_with_line_info error ';'
+  530      | expr4 open_bracket_with_line_info error '}'
+  531      | expr4 open_bracket_with_line_info error ')'
+  532      | open_paren_with_line_info comma_expr2 ')'
+  533      | open_paren_with_line_info error ')'
+  534      | open_paren_with_line_info error "end of file"
+  535      | open_paren_with_line_info error ';'
+  536      | open_paren_with_line_info error '}'
+  537      | expr4 "->" line_number_info magic_identifier
+  538      | expr4 "->?" line_number_info "identifier"
+  539      | expr4 "->" line_number_info error
+
+  540 literal_expr: string
+  541             | "integer literal"
+  542             | "float literal"
+  543             | open_paren_with_line_info '{' expr_list close_brace_or_missing ')'
+  544             | open_paren_with_line_info open_bracket_with_line_info m_expr_list close_bracket_or_missing ')'
+  545             | "(<" line_number_info expr_list ">)"
+  546             | "(<" line_number_info expr_list ')'
+  547             | "(<" line_number_info error ">)"
+  548             | "(<" line_number_info error ')'
+  549             | "(<" line_number_info error "end of file"
+  550             | "(<" line_number_info error ';'
+  551             | "(<" line_number_info error '}'
+
+  552 unqualified_idents: low_idents
+  553                   | unqualified_idents '.' "identifier"
+  554                   | unqualified_idents '.' bad_identifier
+
+  555 qualified_idents: qualified_ident
+  556                 | qualified_idents '.' "identifier"
+  557                 | qualified_idents '.' bad_identifier
+
+  558 idents: unqualified_idents
+  559       | qualified_idents
+
+  560 string_or_identifier: "identifier"
+  561                     | string
+
+  562 inherit_specifier: string_or_identifier "::"
+  563                  | "local" "::"
+  564                  | "global" "::"
+  565                  | inherit_specifier "local" "::"
+  566                  | inherit_specifier "identifier" "::"
+  567                  | inherit_specifier bad_inherit "::"
+
+  568 low_idents: "identifier"
+  569           | '.' "identifier"
+  570           | "global" '.' "identifier"
+  571           | "reserved identifier"
+
+  572 qualified_ident: "predef" "::" "identifier"
+  573                | "predef" "::" bad_identifier
+  574                | "version prefix" "::" "identifier"
+  575                | "version prefix" "::" bad_identifier
+  576                | inherit_specifier "identifier"
+  577                | inherit_specifier bad_identifier
+  578                | inherit_specifier error
+  579                | "::" "identifier"
+  580                | "::" bad_identifier
+
+  581 range_bound: /* empty */
+  582            | comma_expr
+  583            | '<' comma_expr
+  584            | "end of file"
+  585            | '<' "end of file"
+
+  586 gauge: "gauge" catch_arg
+
+  587 typeof: "typeof" '(' expr0 ')'
+  588       | "typeof" '(' error ')'
+  589       | "typeof" '(' error '}'
+  590       | "typeof" '(' error "end of file"
+  591       | "typeof" '(' error ';'
+
+  592 catch_arg: '(' comma_expr ')'
+  593          | '(' error ')'
+  594          | '(' error "end of file"
+  595          | '(' error '}'
+  596          | '(' error ';'
+  597          | block
+  598          | error
+
+  599 @35: /* empty */
+
+  600 catch: "catch" @35 catch_arg
+
+  601 sscanf: "sscanf" '(' expr0 ',' expr0 lvalue_list ')'
+  602       | "sscanf" '(' expr0 ',' expr0 error ')'
+  603       | "sscanf" '(' expr0 ',' expr0 error "end of file"
+  604       | "sscanf" '(' expr0 ',' expr0 error '}'
+  605       | "sscanf" '(' expr0 ',' expr0 error ';'
+  606       | "sscanf" '(' expr0 error ')'
+  607       | "sscanf" '(' expr0 error "end of file"
+  608       | "sscanf" '(' expr0 error '}'
+  609       | "sscanf" '(' expr0 error ';'
+  610       | "sscanf" '(' error ')'
+  611       | "sscanf" '(' error "end of file"
+  612       | "sscanf" '(' error '}'
+  613       | "sscanf" '(' error ';'
+
+  614 lvalue: expr4
+  615       | open_bracket_with_line_info low_lvalue_list ']'
+  616       | type2 "identifier"
+
+  617 low_lvalue_list: lvalue lvalue_list
+
+  618 lvalue_list: /* empty */
+  619            | ',' lvalue lvalue_list
+
+  620 string_segment: "string literal"
+  621               | "__func__"
+
+  622 string: string_segment
+  623       | string string_segment
+
+  624 string_constant: string
+  625                | string_constant '+' string
+
+  626 real_string_constant: "string literal"
+  627                     | real_string_constant "string literal"
+  628                     | real_string_constant '+' "string literal"
+
+  629 bad_identifier: bad_inherit
+  630               | "local"
+
+  631 bad_inherit: bad_expr_ident
+  632            | "array"
+  633            | "__attribute__"
+  634            | "break"
+  635            | "case"
+  636            | "catch"
+  637            | "class"
+  638            | "continue"
+  639            | "default"
+  640            | "__deprecated__"
+  641            | "do"
+  642            | "enum"
+  643            | "float"
+  644            | "for"
+  645            | "foreach"
+  646            | "function"
+  647            | "__func__"
+  648            | "gauge"
+  649            | "if"
+  650            | "import"
+  651            | "int"
+  652            | "lambda"
+  653            | "mapping"
+  654            | "mixed"
+  655            | "multiset"
+  656            | "object"
+  657            | "program"
+  658            | "return"
+  659            | "sscanf"
+  660            | "string"
+  661            | "switch"
+  662            | "typedef"
+  663            | "typeof"
+  664            | "void"
+  665            | "reserved identifier"
+
+  666 bad_expr_ident: "inline"
+  667               | "predef"
+  668               | "private"
+  669               | "protected"
+  670               | "public"
+  671               | "optional"
+  672               | "variant"
+  673               | "__weak__"
+  674               | "static"
+  675               | "extern"
+  676               | "final"
+  677               | "else"
+  678               | "inherit"

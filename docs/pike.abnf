@@ -1,0 +1,818 @@
+; # Pike syntax specification
+;
+; The source of truth for this is language.yacc
+; (https://github.com/pikelang/Pike/blob/master/src/language.yacc) of the Pike
+; source, or more specifically "y.output" which is the generated grammar from
+; language.yacc.
+;
+; Since the Yacc stuff genratates C code, some grammar isn't applicable (at
+; least it doesn't seem so to me) when parsing Pike code statically, so there
+; might be some cleaning up to do here, specifically the "error" cases below,
+; which I can't see have anything to do with Pike syntax itself, but is a way
+; to generate errors for the real runtime and compiler.
+
+all = program
+    / program "end of file"
+
+program = program def
+        / program ";"
+        / ; empty
+
+real_string_or_identifier = identifier
+                          / real_string_constant
+
+optional_rename_inherit = ":" real_string_or_identifier
+                        / ":" bad_identifier
+                        / ":" error
+                        / ; empty
+
+low_program_ref = safe_expr0
+inherit_ref = low_program_ref
+inheritance = modifiers "inherit" inherit_ref optional_rename_inherit ";"
+import = "import" constant_expr ";"
+constant_name = identifier "=" safe_expr0
+              / bad_identifier "=" safe_expr0
+              / error "=" safe_expr0
+constant_list = constant_name
+              / constant_list "," constant_name
+constant = modifiers "constant" constant_list ";"
+block_or_semi = block
+              / ";"
+              / "end of file"
+
+open_paren_or_safe_apply = "("
+                         / "(?"
+close_paren_or_missing = ")"
+                       / ; empty
+close_brace_or_missing = "}"
+                       / ; empty
+close_brace_or_eof = "}"
+                   ; FIXME: I think this is just for error handling in the C
+                   ; source
+                   / "end of file"
+close_bracket_or_missing = "]"
+                         / ; empty
+
+start_function = ; empty
+optional_constant = ; empty
+                  / "constant"
+
+; FIXME: These "identifiers" should probably not be quoted
+def = modifiers optional_attributes simple_type optional_constant identifier start_function "(" arguments close_paren_or_missing block_or_semi
+    / modifiers optional_attributes simple_type optional_constant identifier start_function error
+    / modifiers optional_attributes simple_type optional_constant bad_identifier "(" arguments ")" block_or_semi
+    / modifiers optional_attributes simple_type optional_constant name_list ";"
+    / inheritance
+    / import
+    / constant
+    / modifiers named_class
+    / modifiers enum
+    / annotation ";"
+    ; Should constant really be quoted here?
+    / "@" "constant" ";"
+    / typedef
+    / static_assertion expected_semicolon
+    / error "end of file"
+    / error ";"
+    / error "}"
+    / modifiers "{" program close_brace_or_eof
+
+static_assertion = "_Static_assert" "(" expr0 "," expr0 ")"
+
+optional_dot_dot_dot = "..."
+                     ; FIXME: I think this is just for error handling in the C
+                     ; source
+                     / ".."
+                     / ; empty
+
+optional_identifier = identifier
+                    / bad_identifier
+                    / ; empty
+
+new_arg_name = full_type optional_dot_dot_dot optional_identifier
+
+func_args = "(" arguments close_paren_or_missing
+
+arguments = optional_comma
+          / arguments2 optional_comma
+
+arguments2 = new_arg_name
+           / arguments2 "," new_arg_name
+           / arguments2 ":" new_arg_name
+
+modifier = "__unused__"
+         / "__weak__"
+         / "continue"
+         / "extern"
+         / "final"
+         / "inline"
+         / "local"
+         / "optional"
+         / "private"
+         / "protected"
+         / "public"
+         / "static"
+         / "variant"
+
+magic_identifiers1 = "__unused__"
+                   / "__weak__"
+                   / "_Static_assert"
+                   / "extern"
+                   / "final"
+                   / "inline"
+                   / "local"
+                   / "optional"
+                   / "private"
+                   / "protected"
+                   / "public"
+                   / "static"
+                   / "variant"
+
+magic_identifiers2 = "__attribute__"
+                   / "__deprecated__"
+                   / "__func__"
+                   / "array"
+                   / "enum"
+                   / "float"
+                   / "function"
+                   / "int"
+                   / "mapping"
+                   / "mixed"
+                   / "multiset"
+                   / "object"
+                   / "program"
+                   / "string"
+                   / "typedef"
+                   / "void"
+
+magic_identifiers3 = "if"
+                   / "do"
+                   / "for"
+                   / "while"
+                   / "else"
+                   / "foreach"
+                   / "catch"
+                   / "gauge"
+                   / "class"
+                   / "break"
+                   / "case"
+                   / "constant"
+                   / "continue"
+                   / "default"
+                   / "import"
+                   / "inherit"
+                   / "lambda"
+                   / "predef"
+                   / "return"
+                   / "sscanf"
+                   / "switch"
+                   / "typeof"
+                   / "global"
+
+magic_identifiers = magic_identifiers1
+                  / magic_identifiers2
+                  / magic_identifiers3
+
+; FIXME: Quotes?!
+magic_identifier = identifier
+                 / "reserved identifier"
+                 / magic_identifiers
+
+annotation = "@" constant_expr
+
+annotation_list = ; empty
+                / annotation ":" annotation_list
+
+modifiers = annotation_list modifier_list
+
+modifier_list = ; empty
+              / modifier_list modifier
+
+attribute = "__attribute__" "(" string_constant optional_comma ")"
+          / "__deprecated__" "(" ")"
+          / "__deprecated__"
+
+optional_attributes = ; empty
+                    / optional_attributes attribute
+
+cast = "(" type ")"
+
+soft_cast = "[" type "]"
+
+type2 = type
+      / identifier_type
+
+simple_type = full_type
+
+simple_type2 = type2
+
+full_type = full_type "|" type3
+          / type3
+
+type = type "|" type3
+     / basic_type
+
+type3 = basic_type
+      / identifier_type
+
+basic_type = "float"
+           / "void"
+           / "mixed"
+           / "auto"
+           / "string" opt_string_width
+           / "int" opt_int_range
+           / "mapping" opt_mapping_type
+           / "function" opt_function_type
+           / "object" opt_program_type
+           / "program" opt_program_type
+           / "array" opt_array_type
+           / "multiset" opt_multiset_type
+           / "__attribute__" "(" string_constant "," full_type ")"
+           / "__attribute__" "(" string_constant error ")"
+           / "__attribute__" error
+           / "__deprecated__" "(" full_type ")"
+           / "__deprecated__" "(" error ")"
+
+identifier_type = idents
+                / typeof
+
+number = "integer literal"
+       / "-" "integer literal"
+
+number_or_maxint = ; empty
+                 / number
+
+number_or_minint = ; empty
+                 / number
+
+expected_dot_dot = ".."
+                 ; FIXME: I think this is just for error handling in the C
+                 ; source
+                 / "..."
+
+safe_int_range_type = "bits"
+                    / number_or_minint expected_dot_dot number_or_maxint
+                    / number
+                    / error
+
+opt_int_range = ; empty
+              / "(" safe_int_range_type ")"
+
+opt_string_width = opt_int_range
+                 / "(" safe_int_range_type ":" safe_int_range_type ")"
+                 / "(" safe_int_range_type ":" ")"
+                 / "(" ":" safe_int_range_type ")"
+
+opt_program_type = ; empty
+                 / "(" full_type ")"
+                 / "(" string_constant ")"
+                 / "(" error ")"
+
+opt_function_type = "(" function_type_list optional_dot_dot_dot ":" full_type ")"
+                  / ; empty
+
+function_type_list = optional_comma
+                   / function_type_list2 optional_comma
+
+function_type_list2 = full_type
+                    / function_type_list2 "," full_type
+
+opt_multiset_type = "(" full_type ")"
+                  / ; empty
+
+opt_array_type = "(" full_type ")"
+               / "(" safe_int_range_type ":" full_type ")"
+               / "(" ":" full_type ")"
+               / "(" safe_int_range_type ":" ")"
+               / ; empty
+
+opt_mapping_type = "(" full_type ":" full_type ")"
+                 / ; empty
+
+name_list = new_name
+          / name_list "," new_name
+
+new_name = identifier
+         / bad_identifier
+
+new_name = identifier "=" expr0
+         / identifier "=" error
+         / identifier "=" "end of file"
+         / bad_identifier "=" expr0
+
+new_local_name = identifier
+               / bad_identifier
+
+new_local_name = identifier "=" expr0
+               / bad_identifier "=" expr0
+               / identifier "=" error
+               / identifier "=" "end of file"
+
+= ; empty
+
+block = "{" statements end_block
+
+end_block = "}"
+          / "end of file"
+
+failsafe_block = block
+               / error
+               / "end of file"
+
+local_name_list = new_local_name
+                / local_name_list "," new_local_name
+
+constant_expr = safe_expr0
+
+local_constant_name = identifier "=" safe_expr0
+                    / bad_identifier "=" safe_expr0
+                    / error "=" safe_expr0
+
+local_constant_list = local_constant_name
+                    / local_constant_list "," local_constant_name
+
+local_constant = "constant" local_constant_list ";"
+               / "constant" error ";"
+               / "constant" error "end of file"
+               / "constant" error "}"
+
+statements = ; empty
+           / statements statement
+
+statement_with_semicolon = unused2 expected_semicolon
+
+normal_label_statement = statement_with_semicolon
+                       / import
+                       / cond
+                       / return
+                       / local_constant
+                       / block
+                       / break expected_semicolon
+                       / continue expected_semicolon
+                       / error ";"
+                       / error "end of file"
+                       / error "}"
+                       / ";"
+
+statement = normal_label_statement
+          / while
+          / do
+          / for
+          / foreach
+          / switch
+          / case
+          / default
+          / labeled_statement
+          / simple_type2 local_function
+          / "continue" simple_type2 local_generator
+          / implicit_modifiers named_class
+
+labeled_statement = identifier ":" statement
+
+optional_label = identifier
+               / ; empty
+
+break = "break" optional_label
+
+default = "default" ":"
+        / "default"
+
+continue = "continue" optional_label
+
+start_lambda = ; empty
+
+implicit_identifier = ; empty
+
+lambda = "lambda" implicit_identifier start_lambda func_args failsafe_block
+       / "lambda" implicit_identifier start_lambda error
+
+local_function = identifier start_function func_args failsafe_block
+               / identifier start_function error
+
+local_generator = identifier start_function func_args failsafe_block
+                / identifier start_function error
+
+create_arg = modifiers simple_type optional_dot_dot_dot identifier
+           / modifiers simple_type bad_identifier
+
+create_arguments2 = create_arg
+                  / create_arguments2 "," create_arg
+                  / create_arguments2 ":" create_arg
+
+create_arguments = optional_comma
+                 / create_arguments2 optional_comma
+
+optional_create_arguments = ; empty
+                          / "(" create_arguments close_paren_or_missing
+
+failsafe_program = "{" program end_block
+                 / error
+                 / "end of file"
+
+anon_class = "class" optional_create_arguments failsafe_program
+
+named_class = "class" simple_identifier optional_create_arguments failsafe_program
+
+simple_identifier = identifier
+                  / bad_identifier
+
+enum_value = ; empty
+           / "=" safe_expr0
+
+enum_def = ; empty
+         / simple_identifier enum_value
+
+propagated_enum_value = ; empty
+
+enum_list = enum_def
+          / enum_list "," propagated_enum_value enum_def
+          / error
+
+
+enum = "enum" optional_identifier "{" enum_list end_block
+
+typedef = modifiers "typedef" full_type simple_identifier ";"
+
+save_locals = ; empty
+
+save_block_level = ; empty
+
+cond = "if" save_block_level save_locals "(" safe_comma_expr end_cond statement optional_else_part
+
+end_cond = ")"
+         / "}"
+         / "end of file"
+
+optional_else_part = ; empty
+                   / "else" statement
+
+safe_lvalue = lvalue
+            / error
+
+safe_expr0 = expr0
+           / "end of file"
+           / error
+
+foreach_optional_lvalue = ; empty */
+                        / safe_lvalue
+
+foreach_lvalues = "," safe_lvalue
+                / ";" foreach_optional_lvalue ";" foreach_optional_lvalue
+
+foreach = "foreach" save_block_level save_locals "(" expr0 foreach_lvalues end_cond statement
+
+do = "do" statement "while" "(" safe_comma_expr end_cond expected_semicolon
+   / "do" statement "while" "end of file"
+   / "do" statement "end of file"
+
+expected_semicolon = ";"
+                   / "end of file"
+
+for = "for" save_block_level save_locals "(" unused expected_semicolon for_expr expected_semicolon unused end_cond statement
+
+while = "while" save_block_level save_locals "(" safe_comma_expr end_cond statement
+
+for_expr = ; empty
+         / safe_comma_expr
+
+switch = "switch" save_block_level save_locals "(" safe_comma_expr end_cond statement
+
+case = "case" safe_comma_expr expected_colon
+     / "case" safe_comma_expr expected_dot_dot optional_comma_expr expected_colon
+     / "case" expected_dot_dot safe_comma_expr expected_colon
+
+expected_colon = ":"
+               / ";"
+               / "}"
+               / "end of file"
+
+optional_continue = ; empty
+                  / "continue"
+                  / "break"
+
+return = optional_continue "return" expected_semicolon
+       / optional_continue "return" safe_comma_expr expected_semicolon
+
+unused = ; empty
+       / safe_comma_expr
+
+unused2 = comma_expr
+
+optional_comma_expr = ; empty
+                    / safe_comma_expr
+
+safe_comma_expr = comma_expr
+                / error
+
+comma_expr = comma_expr2
+           / simple_type2 local_name_list
+
+comma_expr2 = expr0
+            / comma_expr2 "," expr0
+
+splice_expr = expr0
+            / "@" expr0
+
+expr0 = expr01
+      / expr4 assign expr0
+      / expr4 assign error
+      / "[" low_lvalue_list "]" assign expr0
+      / "[" low_lvalue_list "]" error
+
+expr01 = expr1
+       / expr1 "?" expr01 ":" expr01
+
+assign = "="
+       / "&="
+       / "|="
+       / "^="
+       / "<<="
+       / ">>="
+       / "+="
+       / "-="
+       / "*="
+       / "**="
+       / "%="
+       / "/="
+       / "?="
+
+optional_comma = ; empty
+               / ","
+
+expr_list = ; empty
+          / expr_list2 optional_comma
+
+expr_list2 = splice_expr
+           / expr_list2 "," splice_expr
+
+m_expr_list = ; empty
+            / m_expr_list2 optional_comma
+
+m_expr_list2 = assoc_pair
+             / m_expr_list2 "," assoc_pair
+             / m_expr_list2 "," error
+
+assoc_pair = expr0 expected_colon expr0
+           / expr0 expected_colon error
+
+expr1 = expr2
+      / expr1 "||" expr1
+      / expr1 "&&" expr1
+      / expr1 "|" expr1
+      / expr1 "^" expr1
+      / expr1 "&" expr1
+      / expr1 "==" expr1
+      / expr1 "!=" expr1
+      / expr1 ">" expr1
+      / expr1 ">=" expr1
+      / expr1 "<" expr1
+      / expr1 "<=" expr1
+      / expr1 "<<" expr1
+      / expr1 ">>" expr1
+      / expr1 "+" expr1
+      / expr1 "-" expr1
+      / expr1 "*" expr1
+      / expr1 "**" expr1
+      / expr1 "%" expr1
+      / expr1 "/" expr1
+      / expr1 "||" error
+      / expr1 "&&" error
+      / expr1 "|" error
+      / expr1 "^" error
+      / expr1 "&" error
+      / expr1 "==" error
+      / expr1 "!=" error
+      / expr1 ">" error
+      / expr1 ">=" error
+      / expr1 "<" error
+      / expr1 "<=" error
+      / expr1 "<<" error
+      / expr1 ">>" error
+      / expr1 "+" error
+      / expr1 "-" error
+      / expr1 "*" error
+      / expr1 "%" error
+      / expr1 "/" error
+
+expr2 = expr3
+     / cast expr2
+     / soft_cast expr2
+     / "++" expr4
+     / "--" expr4
+     / "!" expr2
+     / "~" expr2
+     / "-" expr2
+
+expr3 = expr4
+      / expr4 "++"
+      / expr4 "--"
+
+optional_block = ; empty
+               / "{" start_lambda statements end_block
+
+apply = expr4 "(" expr_list ")" optional_block
+      / expr4 "(?" expr_list ")" optional_block
+      / expr4 open_paren_or_safe_apply error ")" optional_block
+      / expr4 open_paren_or_safe_apply error "end of file"
+      / expr4 open_paren_or_safe_apply error ";"
+      / expr4 open_paren_or_safe_apply error "}"
+
+implicit_modifiers = ; empty
+
+expr4 = idents
+      / expr5
+      / expr5 "." line_number_info identifier
+      / bad_expr_ident
+
+expr5 = literal_expr
+      / catch
+      / gauge
+      / typeof
+      / sscanf
+      / static_assertion
+      / lambda
+      / implicit_modifiers anon_class
+      / implicit_modifiers enum
+      / apply
+      / expr4 "[" "*" "]"
+      / expr4 "[" expr0 "]"
+      / expr4 "[" range_bound expected_dot_dot range_bound "]"
+      / expr4 "[?" expr0 "]"
+      / expr4 "[?" range_bound expected_dot_dot range_bound "]"
+      / expr4 "[" error "]"
+      / expr4 "[" error "end of file"
+      / expr4 "[" error ";"
+      / expr4 "[" error "}"
+      / expr4 "[" error ")"
+      / "(" comma_expr2 ")"
+      / "(" error ")"
+      / "(" error "end of file"
+      / "(" error ";"
+      / "(" error "}"
+      / expr4 "->" magic_identifier
+      / expr4 "->?" identifier
+      / expr4 "->" error
+
+literal_expr = string
+             / "integer literal"
+             / "float literal"
+             / "(" "{" expr_list close_brace_or_missing ")"
+             / "(" "[" m_expr_list close_bracket_or_missing ")"
+             / "(<" expr_list ">)"
+             / "(<" expr_list ")"
+             / "(<" error ">)"
+             / "(<" error ")"
+             / "(<" error "end of file"
+             / "(<" error ";"
+             / "(<" error "}"
+
+unqualified_idents = low_idents
+                   / unqualified_idents "." identifier
+                   / unqualified_idents "." bad_identifier
+
+qualified_idents = qualified_ident
+                 / qualified_idents "." identifier
+                 / qualified_idents "." bad_identifier
+
+idents = unqualified_idents
+       / qualified_idents
+
+string_or_identifier = identifier
+                     / string
+
+inherit_specifier = string_or_identifier "::"
+                 / "local" "::"
+                 / "global" "::"
+                 / inherit_specifier "local" "::"
+                 / inherit_specifier identifier "::"
+                 / inherit_specifier bad_inherit "::"
+
+low_idents = identifier
+           / "." identifier
+           / "global" "." identifier
+           / "reserved identifier"
+
+qualified_ident = "predef" "::" identifier
+                / "predef" "::" bad_identifier
+                / "version prefix" "::" identifier
+                / "version prefix" "::" bad_identifier
+                / inherit_specifier identifier
+                / inherit_specifier bad_identifier
+                / inherit_specifier error
+                / "::" identifier
+                / "::" bad_identifier
+
+range_bound = ; empty
+           / comma_expr
+           / "<" comma_expr
+           / "end of file"
+           / "<" "end of file"
+
+gauge = "gauge" catch_arg
+
+typeof = "typeof" "(" expr0 ")"
+       / "typeof" "(" error ")"
+       / "typeof" "(" error "}"
+       / "typeof" "(" error "end of file"
+       / "typeof" "(" error ";"
+
+catch_arg = "(" comma_expr ")"
+          / "(" error ")"
+          / "(" error "end of file"
+          / "(" error "}"
+          / "(" error ";"
+          / block
+          / error
+
+catch = "catch" catch_arg
+
+sscanf = "sscanf" "(" expr0 "," expr0 lvalue_list ")"
+       / "sscanf" "(" expr0 "," expr0 error ")"
+       / "sscanf" "(" expr0 "," expr0 error "end of file"
+       / "sscanf" "(" expr0 "," expr0 error "}"
+       / "sscanf" "(" expr0 "," expr0 error ";"
+       / "sscanf" "(" expr0 error ")"
+       / "sscanf" "(" expr0 error "end of file"
+       / "sscanf" "(" expr0 error "}"
+       / "sscanf" "(" expr0 error ";"
+       / "sscanf" "(" error ")"
+       / "sscanf" "(" error "end of file"
+       / "sscanf" "(" error "}"
+       / "sscanf" "(" error ";"
+
+lvalue = expr4
+       / "[" low_lvalue_list "]"
+       / type2 identifier
+
+low_lvalue_list = lvalue lvalue_list
+
+lvalue_list = ; /* empty */
+            / "," lvalue lvalue_list
+
+string_segment = "string literal"
+               / "__func__"
+
+string = string_segment
+       / string string_segment
+
+string_constant = string
+                / string_constant "+" string
+
+real_string_constant = "string literal"
+                     / real_string_constant "string literal"
+                     / real_string_constant "+" "string literal"
+
+bad_identifier = bad_inherit
+               / "local"
+
+bad_inherit = bad_expr_ident
+            / "array"
+            / "__attribute__"
+            / "break"
+            / "case"
+            / "catch"
+            / "class"
+            / "continue"
+            / "default"
+            / "__deprecated__"
+            / "do"
+            / "enum"
+            / "float"
+            / "for"
+            / "foreach"
+            / "function"
+            / "__func__"
+            / "gauge"
+            / "if"
+            / "import"
+            / "int"
+            / "lambda"
+            / "mapping"
+            / "mixed"
+            / "multiset"
+            / "object"
+            / "program"
+            / "return"
+            / "sscanf"
+            / "string"
+            / "switch"
+            / "typedef"
+            / "typeof"
+            / "void"
+            / "reserved identifier"
+
+bad_expr_ident = "inline"
+               / "predef"
+               / "private"
+               / "protected"
+               / "public"
+               / "optional"
+               / "variant"
+               / "__weak__"
+               / "static"
+               / "extern"
+               / "final"
+               / "else"
+               / "inherit"
+
+identifier  = ("_" / ALPHA) *(ALPHA / DIGIT / "_")
