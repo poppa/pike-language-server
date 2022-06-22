@@ -139,6 +139,9 @@ public enum Type {
   TILDE,                                  // ~
   XOR,                                    // ^
   ZERO_ID,                                // zero
+
+  // Special
+  EOF,                                    // End of file
 }
 
 public string type_to_string(Token|Type t) {
@@ -279,6 +282,7 @@ public string type_to_string(Token|Type t) {
     "TILDE",
     "XOR",
     "ZERO_ID",
+    "EOF",
   })[t] || "<< UNRESOLVED >>";
 }
 
@@ -303,6 +307,24 @@ public bool is_builtin_type(Token t) {
     STRING_ID,
     VOID_ID,
     ZERO_ID,
+  >)[t->type];
+}
+
+public bool is_modifier(Token t) {
+  return (<
+    UNUSED,
+    WEAK,
+    CONTINUE,
+    EXTERN,
+    FINAL_ID,
+    INLINE,
+    LOCAL_ID,
+    OPTIONAL,
+    PRIVATE,
+    PROTECTED,
+    PUBLIC,
+    STATIC,
+    VARIANT
   >)[t->type];
 }
 
