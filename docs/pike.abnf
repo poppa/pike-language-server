@@ -32,23 +32,21 @@ constant_list = constant_name
 constant = modifiers "constant" constant_list ";"
 block_or_semi = block
               / ";"
-              / "end of file"
-start_function = ; empty
 optional_constant = ; empty
                   / "constant"
 
 ; FIXME: These "identifiers" should probably not be quoted
-def = modifiers optional_attributes simple_type optional_constant identifier start_function "(" arguments ")" block_or_semi
+def = modifiers optional_attributes simple_type optional_constant identifier "(" arguments ")" block_or_semi
     / modifiers optional_attributes simple_type optional_constant name_list ";"
     / modifiers "{" program "}"
+    / modifiers named_class
+    / modifiers enum
     / inheritance
     / import
     / constant
-    / modifiers named_class
-    / modifiers enum
     / annotation ";"
-    ; Should constant really be quoted here?
-    / "@" constant ";"
+    ; Does this make any sense? I'm guessing not
+    ; / "@" "constant" ";"
     / typedef
     / static_assertion ";"
 
@@ -198,10 +196,7 @@ basic_type = "float"
            / "array" opt_array_type
            / "multiset" opt_multiset_type
            / "__attribute__" "(" string_constant "," full_type ")"
-           / "__attribute__" "(" string_constant error ")"
-           / "__attribute__" error
            / "__deprecated__" "(" full_type ")"
-           / "__deprecated__" "(" error ")"
 
 identifier_type = idents
                 / typeof
@@ -223,7 +218,6 @@ expected_dot_dot = ".."
 safe_int_range_type = "bits"
                     / number_or_minint expected_dot_dot number_or_maxint
                     / number
-                    / error
 
 opt_int_range = ; empty
               / "(" safe_int_range_type ")"
@@ -236,7 +230,6 @@ opt_string_width = opt_int_range
 opt_program_type = ; empty
                  / "(" full_type ")"
                  / "(" string_constant ")"
-                 / "(" error ")"
 
 opt_function_type = "(" function_type_list optional_dot_dot_dot ":" full_type ")"
                   / ; empty
@@ -322,13 +315,10 @@ start_lambda = ; empty
 implicit_identifier = ; empty
 
 lambda = "lambda" implicit_identifier start_lambda func_args failsafe_block
-       / "lambda" implicit_identifier start_lambda error
 
-local_function = identifier start_function func_args failsafe_block
-               / identifier start_function error
+local_function = identifier func_args failsafe_block
 
-local_generator = identifier start_function func_args failsafe_block
-                / identifier start_function error
+local_generator = identifier func_args failsafe_block
 
 create_arg = modifiers simple_type optional_dot_dot_dot identifier
 create_arguments2 = create_arg
@@ -457,24 +447,6 @@ expr1 = expr2
       / expr1 "**" expr1
       / expr1 "%" expr1
       / expr1 "/" expr1
-      / expr1 "||" error
-      / expr1 "&&" error
-      / expr1 "|" error
-      / expr1 "^" error
-      / expr1 "&" error
-      / expr1 "==" error
-      / expr1 "!=" error
-      / expr1 ">" error
-      / expr1 ">=" error
-      / expr1 "<" error
-      / expr1 "<=" error
-      / expr1 "<<" error
-      / expr1 ">>" error
-      / expr1 "+" error
-      / expr1 "-" error
-      / expr1 "*" error
-      / expr1 "%" error
-      / expr1 "/" error
 
 expr2 = expr3
      / cast expr2
@@ -524,12 +496,6 @@ literal_expr = string
              / "({" expr_list "})"
              / "([" m_expr_list "])"
              / "(<" expr_list ">)"
-             / "(<" expr_list ")"
-             / "(<" error ">)"
-             / "(<" error ")"
-             / "(<" error "end of file"
-             / "(<" error ";"
-             / "(<" error "}"
 
 unqualified_idents = low_idents
                    / unqualified_idents "." identifier
