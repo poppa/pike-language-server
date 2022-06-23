@@ -46,6 +46,7 @@ public class BlockStatement {
 public class ImportStatement {
   inherit Statement;
   public array(object(Identifier)) identifiers = ({});
+  string path;
 }
 
 public class TypeStatement {

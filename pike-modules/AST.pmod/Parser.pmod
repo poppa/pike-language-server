@@ -76,8 +76,6 @@ public class PikeParser {
       TODO("Unexpected token after end\n");
     }
 
-    werror("ROOT: %O\n", root);
-
     return root;
   }
 
@@ -86,7 +84,7 @@ public class PikeParser {
 
     object(Program) p = make_node(Program, t->location);
 
-    werror("Next token: %O\n", t);
+    TRACE("Next token in do_program(): %O\n", t);
 
     if (t->type == STATIC_ASSERT) {
       TODO("Handle Static_assert()");
@@ -106,8 +104,7 @@ public class PikeParser {
 
   protected void do_block() {
     Token t = next_token();
-
-    werror("Next token: %O\n", t);
+    TRACE("Next token in do_block(): %O\n", t);
   }
 
   protected ImportStatement do_import() {
@@ -118,11 +115,23 @@ public class PikeParser {
       Token t = next_token();
 
       if (t->type == STRING) {
-        TODO("Handle string import\n");
+        s->path = t->value;
+
+        if (peek_token()->type != SEMICOLON) {
+          error("Expected SEMICOLN but got %O", type_to_string(peek_token()));
+        }
+
+        break;
       }
 
       expect(IDENTIFIER);
-      Identifier id = make_node(Identifier, t->location, ([ "name" : t->value ]));
+
+      Identifier id = make_node(
+        Identifier,
+        t->location,
+        ([ "name" : t->value ])
+      );
+
       Token next = peek_token();
 
       if (next->type != DOT && next->type != SEMICOLON) {
