@@ -22,7 +22,9 @@ public class BaseParser {
     return _lexer;
   }
 
-  public Token next_token() {
+  public Token next_token()
+  //! Fetch the next token
+  {
     if (current_token) {
       used_tokens += ({ current_token });
     }
@@ -37,7 +39,17 @@ public class BaseParser {
     return current_token = _lexer->lex();
   }
 
-  public Token peek_token() {
+  public Token accept_next(Type|array(Type) t)
+  //! Fetch the next token and expect it to be of type @[t]
+  {
+    next_token();
+    expect(t);
+    return current_token;
+  }
+
+  public Token peek_token()
+  //! Peek the next token
+  {
     if (peeked_token) {
       return peeked_token;
     }
@@ -51,12 +63,42 @@ public class BaseParser {
     }
   }
 
-  public void expect(Type t) {
-    if (current_token->type != t) {
+  public void expect(Type|array(Type) t)
+  //! Expect the @[current_token] to be of type @[t]
+  {
+    if (!arrayp(t)) {
+      t = ({ t });
+    }
+
+    if (!has_value(t, current_token->type)) {
+      array(string) exp_type = map(t, lambda (Type x) {
+        return sprintf("%q", type_to_string(x));
+      });
+
       error(
-        "Expected %q got %q",
-        type_to_string(t),
+        "Expected token to be %s but got %q",
+        String.implode_nicely(exp_type, "or"),
         type_to_string(current_token)
+      );
+    }
+  }
+
+  public void expect_next(Type|array(Type) t)
+  //! Expect the next token to be of type @[t]
+  {
+    if (!arrayp(t)) {
+      t = ({ t });
+    }
+
+    if (!has_value(t, peek_token()->type)) {
+      array(string) exp_type = map(t, lambda (Type x) {
+        return sprintf("%q", type_to_string(x));
+      });
+
+      error(
+        "Expected next token to be %s but got %q",
+        String.implode_nicely(exp_type, "or"),
+        type_to_string(peek_token())
       );
     }
   }
@@ -70,11 +112,8 @@ public class PikeParser {
   public object(Program) parse() {
     object(Program) root = do_program();
 
-    Token t = next_token();
-
-    if (t != UNDEFINED) {
-      TODO("Unexpected token after end\n");
-    }
+    next_token();
+    expect(EOF);
 
     return root;
   }
@@ -90,8 +129,7 @@ public class PikeParser {
       TODO("Handle Static_assert()");
     } else if (t->type == IMPORT) {
       Node is = do_import();
-      next_token();
-      expect(SEMICOLON);
+      accept_next(SEMICOLON);
       p->body += ({ is });
     } else if (t->type == AT) {
       TODO("Handle annotaton?");
@@ -116,11 +154,7 @@ public class PikeParser {
 
       if (t->type == STRING) {
         s->path = t->value;
-
-        if (peek_token()->type != SEMICOLON) {
-          error("Expected SEMICOLN but got %O", type_to_string(peek_token()));
-        }
-
+        expect_next(SEMICOLON);
         break;
       }
 
@@ -132,13 +166,9 @@ public class PikeParser {
         ([ "name" : t->value ])
       );
 
-      Token next = peek_token();
+      expect_next(({ DOT, SEMICOLON }));
 
-      if (next->type != DOT && next->type != SEMICOLON) {
-        error("Expected DOT or SEMICOLON but got %O", type_to_string(next));
-      }
-
-      if (next->type == DOT) {
+      if (peek_token()->type == DOT) {
         next_token();
       }
 
