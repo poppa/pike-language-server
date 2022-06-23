@@ -427,3 +427,23 @@ public class Token(
     }
   }
 }
+
+public class EofToken {
+  inherit Token;
+
+  protected void create(Location loc, int /* .Lexer.State */ context) {
+    ::create(EOF, loc, "\0", context);
+  }
+
+  public bool `!() {
+    return true;
+  }
+
+  public bool `==(mixed what) {
+    if (undefinedp(what) || what == 0) {
+      return true;
+    }
+
+    return false;
+  }
+}

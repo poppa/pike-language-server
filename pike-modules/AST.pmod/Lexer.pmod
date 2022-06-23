@@ -147,6 +147,20 @@ public class BaseLexer {
     return make_simple_token(type);
   }
 
+  protected .Token.EofToken make_eof_token() {
+    if (!position_start) {
+      set_start_position();
+    }
+
+    .Token.Location loc = .Token.Location(
+      _filename,
+      position_start,
+      .Token.Position(at_byte + 1, line, column + 1),
+    );
+
+    return .Token.EofToken(loc, lex_state);
+  }
+
   protected int `at_byte() {
     int p = cursor;
     // If p == 0 no byte has been read yet
@@ -500,13 +514,13 @@ class Lexer {
     current_string = UNDEFINED;
 
     if (!advance()) {
-      return UNDEFINED;
+      return make_eof_token();
     }
 
     eat_whitespace_and_newline();
 
     if (!char || char == '\0') {
-      return UNDEFINED;
+      return make_eof_token();
     }
 
     TRACE("Current: \"%c\" at (%d:%d)\n", char, line, column);
