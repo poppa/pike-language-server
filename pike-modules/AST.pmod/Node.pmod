@@ -63,5 +63,5 @@ public class Identifier {
 
 public class TypedIdentifier {
   inherit Identifier;
-  public Type type;
+  public AST.Token.Type type;
 }
