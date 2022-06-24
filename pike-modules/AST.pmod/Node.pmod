@@ -28,6 +28,10 @@ public class Node {
 public class Program {
   inherit Node;
   public array(object(Statement)) body = ({});
+
+  protected string _sprintf(int t) {
+    return sprintf("%O -> %O", object_program(this), body);
+  }
 }
 
 public class Statement {
@@ -38,18 +42,26 @@ public class EmptyStatement {
   inherit Statement;
 }
 
-public class BlockStatement {
+public class Block {
   inherit Statement;
   public array(object(Statement)) body = ({});
 }
 
-public class ImportStatement {
+public class Import {
   inherit Statement;
   public array(object(Identifier)) identifiers = ({});
   string path;
+
+  protected string _sprintf(int t) {
+    if (path) {
+      return sprintf("%O -> %q", object_program(this), path);
+    }
+
+    return sprintf("%O -> %O", object_program(this), identifiers);
+  }
 }
 
-public class TypeStatement {
+public class IntrinsicType {
   inherit Statement;
 }
 
@@ -60,9 +72,22 @@ public class Expression {
 public class Identifier {
   inherit Expression;
   public string name;
+
+  protected string _sprintf(int t) {
+    return sprintf("%O(name: %q)", object_program(this), name);
+  }
 }
 
 public class TypedIdentifier {
   inherit Identifier;
   public AST.Token.Type type;
+
+  protected string _sprintf(int t) {
+    return sprintf(
+      "%O %O(name: %q)",
+      AST.Token.type_to_string(type),
+      object_program(this),
+      name
+    );
+  }
 }

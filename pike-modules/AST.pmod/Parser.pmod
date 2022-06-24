@@ -145,9 +145,9 @@ public class PikeParser {
     TRACE("Next token in do_block(): %O\n", t);
   }
 
-  protected ImportStatement do_import() {
+  protected Import do_import() {
     expect(IMPORT);
-    ImportStatement s = make_node(ImportStatement, current_token->location);
+    Import s = make_node(Import, current_token->location);
 
     while (peek_token()->type != SEMICOLON) {
       Token t = next_token();

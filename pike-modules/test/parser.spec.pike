@@ -5,7 +5,7 @@ import AST.Lexer;
 import AST.Node;
 
 int main() {
-describe("Just starting dude", lambda () {
+describe("Basic parser", lambda () {
   test("It should parse import of identifers", lambda () {
     Lexer l = Lexer(#"import Pest.Test;");
     PikeParser p = PikeParser(l);
@@ -13,7 +13,7 @@ describe("Just starting dude", lambda () {
     expect(object_program(ast_p))->to_be(Program);
     expect(sizeof(ast_p->body))->to_equal(1);
 
-    ImportStatement imp = ast_p->body[0];
+    Import imp = ast_p->body[0];
     expect(sizeof(imp->identifiers))->to_equal(2);
     expect(undefinedp(imp->path))->to_equal(true);
     expect(object_program(imp->identifiers[0]))->to_be(Identifier);
@@ -31,7 +31,7 @@ describe("Just starting dude", lambda () {
     Lexer l = Lexer(#"import \".\";");
     PikeParser p = PikeParser(l);
     Program ast_p = p->parse();
-    ImportStatement imp = ast_p->body[0];
+    Import imp = ast_p->body[0];
     expect(imp->identifiers)->to_equal(({}));
     expect(imp->path)->to_equal(".");
   });
