@@ -47,6 +47,7 @@ def = modifiers optional_attributes simple_type optional_constant identifier "("
     / annotation ";"
     ; Does this make any sense? I'm guessing not
     ; / "@" "constant" ";"
+    ; Why isn't this the same as enum above for instance?
     / typedef
     / static_assertion ";"
 

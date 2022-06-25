@@ -38,6 +38,17 @@ public class Statement {
   inherit Node;
 }
 
+public class Modifier {
+  inherit Statement;
+
+  public AST.Token.Type type;
+  public string name;
+}
+
+public class Annotation {
+  inherit Statement;
+}
+
 public class EmptyStatement {
   inherit Statement;
 }

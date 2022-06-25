@@ -7,6 +7,8 @@ import .Node;
 
 #include "parser.h"
 
+public typedef Type|array(Type) expect_t;
+
 public class BaseParser {
   protected BaseLexer _lexer;
   protected ADT.Queue token_queue = ADT.Queue();
@@ -39,7 +41,7 @@ public class BaseParser {
     return current_token = _lexer->lex();
   }
 
-  public Token accept_next(Type|array(Type) t)
+  public Token accept_next(expect_t t)
   //! Fetch the next token and expect it to be of type @[t]
   {
     next_token();
@@ -57,13 +59,15 @@ public class BaseParser {
     return peeked_token = _lexer->lex();
   }
 
-  public Token prev_token() {
+  public Token prev_token()
+  //! Get the previous token
+  {
     if (sizeof(used_tokens)) {
       return used_tokens[-1];
     }
   }
 
-  public void expect(Type|array(Type) t)
+  public void expect(expect_t t)
   //! Expect the @[current_token] to be of type @[t]
   {
     if (!arrayp(t)) {
@@ -83,7 +87,21 @@ public class BaseParser {
     }
   }
 
-  public void expect_next(Type|array(Type) t)
+  public variant void expect(
+    function(Type|Token:bool) fn,
+    Token|Type t,
+    string expected_desc
+  ) {
+    if (!fn(t)) {
+      error(
+        "Expected token to be %s but got %q",
+        expected_desc,
+        type_to_string(t)
+      );
+    }
+  }
+
+  public void expect_next(expect_t t)
   //! Expect the next token to be of type @[t]
   {
     if (!arrayp(t)) {
@@ -111,31 +129,66 @@ public class PikeParser {
 
   public object(Program) parse() {
     object(Program) root = do_program();
-
-    next_token();
-    expect(EOF);
+    expect(({ EOF, SEMICOLON }));
 
     return root;
   }
 
   protected object(Program) do_program() {
-    Token t = next_token();
+    next_token();
+    object(Program) p = make_node(Program, current_token->location);
 
-    object(Program) p = make_node(Program, t->location);
+    while (current_token->type != EOF) {
+      TRACE("Current token in do_program loop?: %O\n", current_token);
 
-    TRACE("Next token in do_program(): %O\n", t);
+      if (current_token->type == STATIC_ASSERT) {
+        TODO("Handle Static_assert()");
+      } else if (current_token->type == IMPORT) {
+        Node is = do_import();
+        accept_next(SEMICOLON);
+        p->body += ({ is });
+      } else if (current_token->type == AT) {
+        TODO("Handle annotation?");
+      } else if (is_modifier(current_token)) {
+        array(Annotation|Modifier) mods = do_modifiers();
+        p->body += mods;
 
-    if (t->type == STATIC_ASSERT) {
-      TODO("Handle Static_assert()");
-    } else if (t->type == IMPORT) {
-      Node is = do_import();
-      accept_next(SEMICOLON);
-      p->body += ({ is });
-    } else if (t->type == AT) {
-      TODO("Handle annotaton?");
-    } else if (is_modifier(t)) {
-      TODO("What's next after modifier");
+        expect(({
+          CURLY_LEFT,
+          CLASS,
+          ENUM,
+          TYPEDEF,
+          INHERIT,
+          IMPORT,
+          CONSTANT,
+          AT,
+          STATIC_ASSERT,
+          DEPRECATED_ID,
+          ATTRIBUTE_ID,
+        }));
+
+        continue;
+      } else if (current_token->type == CURLY_LEFT) {
+        TODO("Handle block after modifier");
+      } else if (current_token->type == CLASS) {
+        TODO("Handle class after modifer");
+      } else if (current_token->type == ENUM) {
+        TODO("Handle enum after modifer");
+      } else if (current_token->type == TYPEDEF) {
+        TODO("Handle typedef efter modifer");
+      } else if (current_token->type == CONSTANT) {
+        TODO("Handle constant");
+      } else if (current_token->type == AT) {
+        TODO("Handle annotation");
+      } else if (is_attribute(current_token)) {
+        TODO("Handle attribute");
+      } else {
+        TODO("Uninmplemented or syntax error: %O\n", current_token);
+      }
+
+      next_token();
     }
+
 
     return p;
   }
@@ -176,5 +229,49 @@ public class PikeParser {
     }
 
     return s;
+  }
+
+  protected array(Annotation|Modifier) do_modifiers() {
+    array(Annotation) anonlist = do_annotation_list();
+    array(Modifier) mods = do_modifier_list();
+
+    array(Annotation|Modifier) out = ({});
+
+    if (sizeof(anonlist || ({}))) {
+      out += anonlist;
+    }
+
+    if (sizeof(mods)) {
+      out += mods;
+    }
+
+    return out;
+  }
+
+  protected array(Modifier) do_modifier_list() {
+    array(Modifier) mods = ({});
+    while (is_modifier(current_token)) {
+      mods += ({ do_modifier() });
+      next_token();
+    }
+
+    return mods;
+  }
+
+  protected Modifier do_modifier() {
+    expect(is_modifier, current_token, "'Modifier'");
+
+    return make_node(Modifier,current_token->location, ([
+      "name": current_token->value,
+      "type": current_token->type,
+    ]));
+  }
+
+  protected mixed do_annotation_list() {
+
+  }
+
+  protected mixed do_annotation() {
+
   }
 }

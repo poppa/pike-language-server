@@ -1,7 +1,7 @@
 #ifndef PARSER_H
 #define PARSER_H
 
-#ifdef PASER_DEBUG
+#ifdef PARSER_DEBUG
 # define TRACE(X...)werror("%s:%d: %s",basename(__FILE__),__LINE__,sprintf(X))
 #else
 # define TRACE(X...)0

@@ -36,6 +36,11 @@ describe("Basic parser", lambda () {
     expect(imp->path)->to_equal(".");
   });
 
+  test("It should parse modifiers", lambda () {
+    PikeParser p = PikeParser(Lexer("public Xttribute__ string name;"));
+    Program ast_p = p->parse();
+  });
+
   test("It should be peekable", lambda () {
     Lexer l = Lexer("import AST.Token;");
     PikeParser p = PikeParser(l);

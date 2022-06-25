@@ -286,11 +286,15 @@ public string type_to_string(Token|Type t) {
   })[t] || "<< UNRESOLVED >>";
 }
 
-public bool is_access_modifer(Token t) {
-  return (< PUBLIC, PRIVATE, PROTECTED, STATIC >)[t->type];
+public bool is_attribute(Token t) {
+  return (< ATTRIBUTE_ID, DEPRECATED_ID >)[t->type];
 }
 
-public bool is_builtin_type(Token t) {
+public bool is_builtin_type(Token|Type t) {
+  if (!intp(t)) {
+    t = t->type;
+  }
+
   return (<
     ARRAY_ID,
     AUTO_ID,
@@ -307,10 +311,14 @@ public bool is_builtin_type(Token t) {
     STRING_ID,
     VOID_ID,
     ZERO_ID,
-  >)[t->type];
+  >)[t];
 }
 
-public bool is_modifier(Token t) {
+public bool is_modifier(Token|Type t) {
+  if (!intp(t)) {
+    t = t->type;
+  }
+
   return (<
     UNUSED,
     WEAK,
@@ -325,7 +333,7 @@ public bool is_modifier(Token t) {
     PUBLIC,
     STATIC,
     VARIANT
-  >)[t->type];
+  >)[t];
 }
 
 constant PRAGMA_DIRECTIVES = (<
@@ -401,7 +409,7 @@ public class Token(
   public Type type,
   public Location location,
   public string value,
-  int /* .Lexer.State */ context,
+  public int /* .Lexer.State */ context,
 ) {
   protected mixed cast(string how) {
     switch (how) {
