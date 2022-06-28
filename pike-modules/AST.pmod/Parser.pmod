@@ -7,7 +7,7 @@ import .Node;
 
 #include "parser.h"
 
-public typedef Type|array(Type) expect_t;
+public typedef Type|multiset(Type) expect_t;
 
 public class BaseParser {
   protected BaseLexer _lexer;
@@ -70,12 +70,12 @@ public class BaseParser {
   public void expect(expect_t t)
   //! Expect the @[current_token] to be of type @[t]
   {
-    if (!arrayp(t)) {
-      t = ({ t });
+    if (!multisetp(t)) {
+      t = (< t >);
     }
 
-    if (!has_value(t, current_token->type)) {
-      array(string) exp_type = map(t, lambda (Type x) {
+    if (!t[current_token->type]) {
+      array(string) exp_type = map((array(int)) t, lambda (Type x) {
         return sprintf("%q", type_to_string(x));
       });
 
@@ -104,12 +104,12 @@ public class BaseParser {
   public void expect_next(expect_t t)
   //! Expect the next token to be of type @[t]
   {
-    if (!arrayp(t)) {
-      t = ({ t });
+    if (!multisetp(t)) {
+      t = (< t >);
     }
 
-    if (!has_value(t, peek_token()->type)) {
-      array(string) exp_type = map(t, lambda (Type x) {
+    if (!t[peek_token()->type]) {
+      array(string) exp_type = map((array(int)) t, lambda (Type x) {
         return sprintf("%q", type_to_string(x));
       });
 
@@ -129,7 +129,7 @@ public class PikeParser {
 
   public object(Program) parse() {
     object(Program) root = do_program();
-    expect(({ EOF, SEMICOLON }));
+    expect((< EOF, SEMICOLON >));
 
     return root;
   }
@@ -153,23 +153,25 @@ public class PikeParser {
         array(Annotation|Modifier) mods = do_modifiers();
         p->body += mods;
 
-        expect(({
-          CURLY_LEFT,
-          CLASS,
-          ENUM,
-          TYPEDEF,
-          INHERIT,
-          IMPORT,
-          CONSTANT,
-          AT,
-          STATIC_ASSERT,
-          DEPRECATED_ID,
-          ATTRIBUTE_ID,
-        }));
+        expect(
+          (<
+            CURLY_LEFT,
+            CLASS,
+            ENUM,
+            TYPEDEF,
+            INHERIT,
+            IMPORT,
+            CONSTANT,
+            AT,
+            STATIC_ASSERT,
+          >)
+          + basic_types
+          + attribute_types
+        );
 
         continue;
       } else if (current_token->type == CURLY_LEFT) {
-        TODO("Handle block after modifier");
+        TODO("Handle block");
       } else if (current_token->type == CLASS) {
         TODO("Handle class after modifer");
       } else if (current_token->type == ENUM) {
@@ -182,6 +184,10 @@ public class PikeParser {
         TODO("Handle annotation");
       } else if (is_attribute(current_token)) {
         TODO("Handle attribute");
+      } else if (is_builtin_type(current_token)) {
+        IntrinsicType type = do_basic_type();
+        p->body += ({ type });
+        TODO("Handle type: %O -> %O\n", type, p->body);
       } else {
         TODO("Uninmplemented or syntax error: %O\n", current_token);
       }
@@ -196,6 +202,91 @@ public class PikeParser {
   protected void do_block() {
     Token t = next_token();
     TRACE("Next token in do_block(): %O\n", t);
+  }
+
+  protected mixed do_basic_type() {
+    expect(is_builtin_type, current_token, "\"basic type\"");
+
+    Location loc = current_token->location;
+    IntrinsicType t;
+    Token peeked = peek_token();
+
+    switch (current_token->type) {
+      case INT_ID: {
+        t = make_node(IntrinsicIntType, loc, ([ "name" : "int" ]));
+      } break;
+
+      case STRING_ID: {
+        t = make_node(IntrinsicStringType, loc, ([
+          "name": "string",
+          "width" : UNDEFINED
+        ]));
+
+        if (peeked->type == PAREN_LEFT) {
+          next_token();
+          Token n = next_token();
+          expect((< NUMBER, DOT_DOT >));
+          peeked = peek_token();
+
+          // string(..N)
+          if (n->type == DOT_DOT) {
+            next_token();
+            expect(NUMBER);
+            t->width = make_node(IntRangeType, n->location, ([
+              "range" : ({ UNDEFINED, (int)current_token->value })
+            ]));
+          }
+          // string(Nbit)
+          else if (peeked->type == IDENTIFIER) {
+            if (peeked->value != "bit") {
+              error("Expexted \"bit\" got %q", peeked->value);
+            }
+
+            next_token();
+            Location nloc = n->location;
+            t->width = make_node(IntRangeType, nloc, ([
+              "range": make_node(Bits, nloc, ([ "width": (int)n->value ]))
+            ]));
+          }
+          // string(N)
+          else if (peeked->type == PAREN_RIGHT) {
+            t->width = make_node(IntRangeType, n->location, ([
+              "range": (int)n->value
+            ]));
+          }
+          // string(N..?)
+          else if (peeked->type == DOT_DOT) {
+            int start_value = (int)n->value;
+            next_token();
+            peeked = peek_token();
+
+            // string(N..)
+            if (peeked->type == PAREN_RIGHT) {
+              t->width = make_node(IntRangeType, n->location, ([
+                "range" : ({ start_value, UNDEFINED })
+              ]));
+            } else if (peeked->type == NUMBER) {
+              next_token();
+              t->width = make_node(IntRangeType, n->location, ([
+                "range" : ({ start_value, (int)current_token->value })
+              ]));
+            } else {
+              error("Expected something other than %O\n", peeked);
+            }
+          }
+
+          accept_next(PAREN_RIGHT);
+        }
+
+        return t;
+      }
+
+      default: TODO("Handle builtin (basic) type: %O\n", current_token);
+    }
+
+    TRACE("Initrinsic type node: %O\n", t);
+
+    return t;
   }
 
   protected Import do_import() {
@@ -219,7 +310,7 @@ public class PikeParser {
         ([ "name" : t->value ])
       );
 
-      expect_next(({ DOT, SEMICOLON }));
+      expect_next((< DOT, SEMICOLON >));
 
       if (peek_token()->type == DOT) {
         next_token();
@@ -234,7 +325,6 @@ public class PikeParser {
   protected array(Annotation|Modifier) do_modifiers() {
     array(Annotation) anonlist = do_annotation_list();
     array(Modifier) mods = do_modifier_list();
-
     array(Annotation|Modifier) out = ({});
 
     if (sizeof(anonlist || ({}))) {

@@ -61,7 +61,7 @@ public class Block {
 public class Import {
   inherit Statement;
   public array(object(Identifier)) identifiers = ({});
-  string path;
+  public string path;
 
   protected string _sprintf(int t) {
     if (path) {
@@ -72,8 +72,59 @@ public class Import {
   }
 }
 
+public class Bits {
+  inherit Statement;
+  int width;
+}
+
+public class IntRangeType {
+  inherit Statement;
+  //! Can represent something like:
+  //! @code
+  //! string(8bit)
+  //! int(0..1)
+  //! int(8)
+  //! @endcode
+  public Bits|int|array(int) range;
+
+  protected string _sprintf(int t) {
+    if (arrayp(range)) {
+      if (undefinedp(range[0])) {
+        return sprintf("..%d", range[1]);
+      } else if (undefinedp(range[1])) {
+        return sprintf("%d..", range[0]);
+      }
+
+      return sprintf("%d..%d", range[0], range[1]);
+    } else {
+      return sprintf("%d", range);
+    }
+
+    return sprintf("%dbits", range->width);
+  }
+}
+
 public class IntrinsicType {
   inherit Statement;
+  public string name;
+}
+
+public class IntrinsicStringType {
+  inherit IntrinsicType;
+  public IntRangeType width;
+
+  protected string _sprintf(int t) {
+    if (undefinedp(width)) {
+      return sprintf("%O()", object_program(this));
+    }
+
+    return sprintf("%O(width: %O)", object_program(this), width || UNDEFINED);
+  }
+}
+
+public class IntrinsicIntType {
+  inherit IntrinsicType;
+  public IntRangeType range;
 }
 
 public class Expression {

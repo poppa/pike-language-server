@@ -286,54 +286,59 @@ public string type_to_string(Token|Type t) {
   })[t] || "<< UNRESOLVED >>";
 }
 
+public multiset(int) attribute_types = (< ATTRIBUTE_ID, DEPRECATED_ID >);
+
 public bool is_attribute(Token t) {
-  return (< ATTRIBUTE_ID, DEPRECATED_ID >)[t->type];
+  return attribute_types[t->type];
 }
+
+public multiset(int) basic_types = (<
+  ARRAY_ID,
+  AUTO_ID,
+  FINAL_ID,
+  FLOAT_ID,
+  FUNCTION_ID,
+  INT_ID,
+  MAPPING_ID,
+  MIXED_ID,
+  MULTISET_ID,
+  OBJECT_ID,
+  PROGRAM_ID,
+  STRING_ID,
+  VOID_ID,
+  ZERO_ID,
+>);
 
 public bool is_builtin_type(Token|Type t) {
   if (!intp(t)) {
     t = t->type;
   }
 
-  return (<
-    ARRAY_ID,
-    AUTO_ID,
-    FINAL_ID,
-    FLOAT_ID,
-    FUNCTION_ID,
-    INT_ID,
-    LOCAL_ID,
-    MAPPING_ID,
-    MIXED_ID,
-    MULTISET_ID,
-    OBJECT_ID,
-    PROGRAM_ID,
-    STRING_ID,
-    VOID_ID,
-    ZERO_ID,
-  >)[t];
+  return basic_types[t];
 }
+
+public multiset(int) modifier_types = (<
+  UNUSED,
+  WEAK,
+  CONTINUE,
+  EXTERN,
+  FINAL_ID,
+  INLINE,
+  LOCAL_ID,
+  OPTIONAL,
+  PRIVATE,
+  PROTECTED,
+  PUBLIC,
+  STATIC,
+  VARIANT
+>);
 
 public bool is_modifier(Token|Type t) {
   if (!intp(t)) {
     t = t->type;
   }
 
-  return (<
-    UNUSED,
-    WEAK,
-    CONTINUE,
-    EXTERN,
-    FINAL_ID,
-    INLINE,
-    LOCAL_ID,
-    OPTIONAL,
-    PRIVATE,
-    PROTECTED,
-    PUBLIC,
-    STATIC,
-    VARIANT
-  >)[t];
+  return modifier_types[t];
 }
 
 constant PRAGMA_DIRECTIVES = (<

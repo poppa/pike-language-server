@@ -36,8 +36,8 @@ describe("Basic parser", lambda () {
     expect(imp->path)->to_equal(".");
   });
 
-  test("It should parse modifiers", lambda () {
-    PikeParser p = PikeParser(Lexer("public Xttribute__ string name;"));
+  test("It should parse identifier with modifiers and basic type", lambda () {
+    PikeParser p = PikeParser(Lexer("public string name;"));
     Program ast_p = p->parse();
   });
 
