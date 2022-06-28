@@ -36,8 +36,8 @@ optional_constant = ; empty
                   / "constant"
 
 ; FIXME: These "identifiers" should probably not be quoted
-def = modifiers optional_attributes simple_type optional_constant identifier "(" arguments ")" block_or_semi
-    / modifiers optional_attributes simple_type optional_constant name_list ";"
+def = modifiers optional_attributes full_type optional_constant identifier "(" arguments ")" block_or_semi
+    / modifiers optional_attributes full_type optional_constant name_list ";"
     / modifiers "{" program "}"
     / modifiers named_class
     / modifiers enum
@@ -171,8 +171,6 @@ soft_cast = "[" type "]"
 type2 = type
       / identifier_type
 
-simple_type = full_type
-
 simple_type2 = type2
 
 full_type = full_type "|" type3
@@ -188,6 +186,7 @@ basic_type = "float"
            / "void"
            / "mixed"
            / "auto"
+           / "zero" ; I think this is comming in 8.1
            / "string" opt_string_width
            / "int" opt_int_range
            / "mapping" opt_mapping_type
@@ -212,10 +211,6 @@ number_or_minint = ; empty
                  / number
 
 expected_dot_dot = ".."
-                 ; FIXME: I think this is just for error handling in the C
-                 ; source
-                 / "..."
-
 safe_int_range_type = "bits"
                     / number_or_minint expected_dot_dot number_or_maxint
                     / number
@@ -321,7 +316,7 @@ local_function = identifier func_args failsafe_block
 
 local_generator = identifier func_args failsafe_block
 
-create_arg = modifiers simple_type optional_dot_dot_dot identifier
+create_arg = modifiers full_type optional_dot_dot_dot identifier
 create_arguments2 = create_arg
                   / create_arguments2 "," create_arg
                   / create_arguments2 ":" create_arg
