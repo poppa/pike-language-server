@@ -26,9 +26,9 @@ lexer and parser to statically parse and analyze Pike code. So static lexing
 and parsing needs to be re-implemented to then create an AST for proper linting
 and formatting.
 
-A working (we'll to the best of my abilities an knowlege)
+A working (we'll to the best of my abilities and knowledge)
 [lexer](pike-modules/AST.pmod/Lexer.pmod) is in place and seems to lex Pike
-code pretty well. It may need some performance imrovements, but hey, its doing
+code pretty well. It may need some performance improvements, but hey, its doing
 stuff. I took a long and hard look at Pike's built-in C-lexer, so this new one
 shouldn't deviate too much from the built-in, albeit it's extended with some
 extra and more granular token types.
@@ -59,8 +59,8 @@ written a simple [`JSON-RPC` implementation](pike-modules/JsonRpc.pmod/module.pm
 ### Testing testing testing
 
 Personally I thing Pike's built-in testing framework is super-clonky and
-har to use, so I've created my own, extremely limited, unit testing framework
-called [Pest](https://github.com/poppa/pest), which, you can tell by its name,
+hard to use, so I've created my own, extremely limited, unit testing framework
+called [Pest](https://github.com/poppa/pest), which, as its name suggests,
 is influenced by [Jest](https://jestjs.io/).
 
 All Pike tests reside in [pike-modules/test](pike-modules/test/).
