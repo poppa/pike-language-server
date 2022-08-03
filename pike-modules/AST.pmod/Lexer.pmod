@@ -512,6 +512,7 @@ class Lexer {
 
   public .Token.Token lex() {
     current_string = UNDEFINED;
+    char = 0;
 
     if (!advance()) {
       return make_eof_token();
