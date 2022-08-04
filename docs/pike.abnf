@@ -35,7 +35,6 @@ block_or_semi = block
 optional_constant = ; empty
                   / "constant"
 
-; FIXME: These "identifiers" should probably not be quoted
 def = modifiers optional_attributes full_type optional_constant identifier "(" arguments ")" block_or_semi
     / modifiers optional_attributes full_type optional_constant name_list ";"
     / modifiers "{" program "}"
@@ -606,4 +605,4 @@ bad_expr_ident = "inline"
                / "else"
                / "inherit"
 
-identifier  = ("_" / ALPHA) *(ALPHA / DIGIT / "_")
+identifier = ("_" / ALPHA) *(ALPHA / DIGIT / "_")
