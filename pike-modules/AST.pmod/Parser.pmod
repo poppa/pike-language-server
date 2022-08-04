@@ -149,47 +149,74 @@ public class PikeParser {
         p->body += ({ is });
       } else if (current_token->type == AT) {
         TODO("Handle annotation?");
-      } else if (is_modifier(current_token)) {
+      }
+      // Handle modifier
+      else if (is_modifier(current_token)) {
         array(Annotation|Modifier) mods = do_modifiers();
-        p->body += mods;
 
-        expect(
-          (<
-            CURLY_LEFT,
-            CLASS,
-            ENUM,
-            TYPEDEF,
-            INHERIT,
-            IMPORT,
-            CONSTANT,
-            AT,
-            STATIC_ASSERT,
-          >)
-          + basic_types
-          + attribute_types
-        );
+        /*
+          TODO: Potential stuff to follow...
+
+                "{" program "}"
+                "constant"
+                "inherit"
+                "typedef"
+                "enum"
+                "class"
+                optional_attributes ... identifier/indentifier list
+        */
+        if (current_token->type == CURLY_LEFT) {
+          TODO("Curly left after modifier -> recurse\n");
+        }
+
+        Node attr, type;
+        bool is_const = false;
+
+        if (current_token->type == ATTRIBUTE_ID) {
+          attr = do_attribute();
+        }
+
+        int old_type = current_token->type;
+        if (is_builtin_type(current_token)) {
+          type = do_basic_type();
+          accept_next((< CONSTANT, IDENTIFIER >));
+        }
+
+        if (current_token->type == CONSTANT) {
+          is_const = true;
+          next_token();
+        }
+
+        // This is either an identifier like a function/method/variable
+        // declaration, or the start of a "list" of variable declarations
+        expect(IDENTIFIER);
+
+        TODO("mods: %O, type: %O, is const: %O -> %O\n",
+          mods, type, is_const, current_token);
 
         continue;
       } else if (current_token->type == CURLY_LEFT) {
-        TODO("Handle block");
+        TODO("Handle block -> scoped 'program'");
       } else if (current_token->type == CLASS) {
-        TODO("Handle class after modifer");
+        TODO("Handle class in program");
       } else if (current_token->type == ENUM) {
-        TODO("Handle enum after modifer");
+        TODO("Handle enum in program");
       } else if (current_token->type == TYPEDEF) {
-        TODO("Handle typedef efter modifer");
+        TODO("Handle typedef in program");
       } else if (current_token->type == CONSTANT) {
-        TODO("Handle constant");
+        TODO("Handle constant in program\n");
       } else if (current_token->type == AT) {
-        TODO("Handle annotation");
+        TODO("Handle annotation in program");
       } else if (is_attribute(current_token)) {
-        TODO("Handle attribute");
+        TODO("Handle attribute in program");
       } else if (is_builtin_type(current_token)) {
-        IntrinsicType type = do_basic_type();
-        p->body += ({ type });
-        TODO("Handle type: %O -> %O\n", type, p->body);
+        TODO("Handle built-in type in program");
       } else {
-        TODO("Uninmplemented or syntax error: %O\n", current_token);
+        TODO(
+          "Uninmplemented or syntax error: %O -> body: %O\n",
+          current_token,
+          p->body
+        );
       }
 
       next_token();
@@ -204,6 +231,63 @@ public class PikeParser {
     TRACE("Next token in do_block(): %O\n", t);
   }
 
+  protected void|IntRangeType resolve_range() {
+    next_token();
+    Token n = next_token();
+    expect((< NUMBER, DOT_DOT >));
+    Token peeked = peek_token();
+    IntRangeType ret;
+
+    // string(..N)
+    if (n->type == DOT_DOT) {
+      next_token();
+      expect(NUMBER);
+      ret = make_node(IntRangeType, n->location, ([
+        "range" : ({ UNDEFINED, (int)current_token->value })
+      ]));
+    }
+    // string(N)
+    else if (peeked->type == PAREN_RIGHT) {
+      ret = make_node(IntRangeType, n->location, ([
+        "range": (int)n->value
+      ]));
+    }
+    // string(N..?)
+    else if (peeked->type == DOT_DOT) {
+      int start_value = (int)n->value;
+      next_token();
+      peeked = peek_token();
+
+      // string(N..)
+      if (peeked->type == PAREN_RIGHT) {
+        ret = make_node(IntRangeType, n->location, ([
+          "range" : ({ start_value, UNDEFINED })
+        ]));
+      } else if (peeked->type == NUMBER) {
+        next_token();
+        ret = make_node(IntRangeType, n->location, ([
+          "range" : ({ start_value, (int)current_token->value })
+        ]));
+      } else {
+        error("Expected something other than %O\n", peeked);
+      }
+    }
+    // string(Nbit)
+    else if (peeked->type == IDENTIFIER) {
+      if (peeked->value != "bit") {
+        error("Expexted \"bit\" got %q", peeked->value);
+      }
+
+      next_token();
+      Location nloc = n->location;
+      ret = make_node(IntRangeType, nloc, ([
+        "range": make_node(Bits, nloc, ([ "width": (int)n->value ]))
+      ]));
+    }
+
+    return ret;
+  }
+
   protected mixed do_basic_type() {
     expect(is_builtin_type, current_token, "\"basic type\"");
 
@@ -214,6 +298,11 @@ public class PikeParser {
     switch (current_token->type) {
       case INT_ID: {
         t = make_node(IntrinsicIntType, loc, ([ "name" : "int" ]));
+
+        if (peeked->type == PAREN_LEFT) {
+          t->range = resolve_range();
+          accept_next(PAREN_RIGHT);
+        }
       } break;
 
       case STRING_ID: {
@@ -223,58 +312,7 @@ public class PikeParser {
         ]));
 
         if (peeked->type == PAREN_LEFT) {
-          next_token();
-          Token n = next_token();
-          expect((< NUMBER, DOT_DOT >));
-          peeked = peek_token();
-
-          // string(..N)
-          if (n->type == DOT_DOT) {
-            next_token();
-            expect(NUMBER);
-            t->width = make_node(IntRangeType, n->location, ([
-              "range" : ({ UNDEFINED, (int)current_token->value })
-            ]));
-          }
-          // string(Nbit)
-          else if (peeked->type == IDENTIFIER) {
-            if (peeked->value != "bit") {
-              error("Expexted \"bit\" got %q", peeked->value);
-            }
-
-            next_token();
-            Location nloc = n->location;
-            t->width = make_node(IntRangeType, nloc, ([
-              "range": make_node(Bits, nloc, ([ "width": (int)n->value ]))
-            ]));
-          }
-          // string(N)
-          else if (peeked->type == PAREN_RIGHT) {
-            t->width = make_node(IntRangeType, n->location, ([
-              "range": (int)n->value
-            ]));
-          }
-          // string(N..?)
-          else if (peeked->type == DOT_DOT) {
-            int start_value = (int)n->value;
-            next_token();
-            peeked = peek_token();
-
-            // string(N..)
-            if (peeked->type == PAREN_RIGHT) {
-              t->width = make_node(IntRangeType, n->location, ([
-                "range" : ({ start_value, UNDEFINED })
-              ]));
-            } else if (peeked->type == NUMBER) {
-              next_token();
-              t->width = make_node(IntRangeType, n->location, ([
-                "range" : ({ start_value, (int)current_token->value })
-              ]));
-            } else {
-              error("Expected something other than %O\n", peeked);
-            }
-          }
-
+          t->width = resolve_range();
           accept_next(PAREN_RIGHT);
         }
 
@@ -283,8 +321,6 @@ public class PikeParser {
 
       default: TODO("Handle builtin (basic) type: %O\n", current_token);
     }
-
-    TRACE("Initrinsic type node: %O\n", t);
 
     return t;
   }
@@ -351,7 +387,7 @@ public class PikeParser {
   protected Modifier do_modifier() {
     expect(is_modifier, current_token, "'Modifier'");
 
-    return make_node(Modifier,current_token->location, ([
+    return make_node(Modifier, current_token->location, ([
       "name": current_token->value,
       "type": current_token->type,
     ]));
@@ -363,5 +399,41 @@ public class PikeParser {
 
   protected mixed do_annotation() {
 
+  }
+
+  protected Attribute do_attribute() {
+    Location loc = current_token->location;
+
+    if (current_token->type == ATTRIBUTE_ID) {
+      accept_next(PAREN_LEFT);
+      accept_next(STRING);
+
+      Attribute a = make_node(Attribute, loc, ([
+        "name": "__attribute__",
+        "arg": make_node(StringConstant, current_token->location, ([
+          "value": current_token->value,
+        ]))
+      ]));
+
+      next_token();
+
+      if (current_token->type == COMMA) {
+        accept_next(PAREN_RIGHT);
+      } else {
+        expect(PAREN_RIGHT);
+        next_token();
+      }
+
+      return a;
+    } else if (current_token->type == DEPRECATED_ID) {
+      if (peek_token()->type == PAREN_LEFT) {
+        next_token();
+        accept_next(PAREN_RIGHT);
+      }
+
+      return make_node(Attribute, loc, ([ "name": "__deprecated__" ]));
+    } else {
+      TODO("Throw syntax error\n");
+    }
   }
 }

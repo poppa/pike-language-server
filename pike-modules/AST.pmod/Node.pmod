@@ -25,8 +25,14 @@ public class Node {
   }
 }
 
+public class WithModifier {
+  public array(Modifier) modifier;
+}
+
 public class Program {
   inherit Node;
+  inherit WithModifier;
+
   public array(object(Statement)) body = ({});
 
   protected string _sprintf(int t) {
@@ -43,6 +49,10 @@ public class Modifier {
 
   public AST.Token.Type type;
   public string name;
+
+  protected string _sprintf(int t) {
+    return sprintf("%O(%s)", object_program(this), name);
+  }
 }
 
 public class Annotation {
@@ -96,11 +106,13 @@ public class IntRangeType {
       }
 
       return sprintf("%d..%d", range[0], range[1]);
-    } else {
+    } else if (objectp(range)) {
+      return sprintf("%dbits", range->width);
+    } else if (intp(range)) {
       return sprintf("%d", range);
     }
 
-    return sprintf("%dbits", range->width);
+    return "";
   }
 }
 
@@ -124,7 +136,15 @@ public class IntrinsicStringType {
 
 public class IntrinsicIntType {
   inherit IntrinsicType;
-  public IntRangeType range;
+  public IntRangeType range = UNDEFINED;
+
+  protected string _sprintf(int t) {
+    if (undefinedp(range)) {
+      return sprintf("%O()", object_program(this));
+    }
+
+    return sprintf("%O(%O)", object_program(this), range);
+  }
 }
 
 public class Expression {
@@ -140,8 +160,20 @@ public class Identifier {
   }
 }
 
+public class StringConstant {
+  inherit Expression;
+
+  public string value;
+
+  protected string _sprintf(int t) {
+    return sprintf("%O(%q)", object_program(this), value);
+  }
+}
+
 public class TypedIdentifier {
   inherit Identifier;
+  inherit WithModifier;
+
   public AST.Token.Type type;
 
   protected string _sprintf(int t) {
@@ -151,5 +183,19 @@ public class TypedIdentifier {
       object_program(this),
       name
     );
+  }
+}
+
+public class Attribute {
+  inherit Statement;
+
+  public string name;
+  public void|StringConstant arg;
+
+  protected string _sprintf(int t) {
+    if (arg) {
+      return sprintf("%O(%s: %q)", object_program(this), name, arg->value);
+    }
+    return sprintf("%O(%s)", object_program(this), name);
   }
 }
