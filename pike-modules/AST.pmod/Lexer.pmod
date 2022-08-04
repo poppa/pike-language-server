@@ -784,8 +784,10 @@ class Lexer {
 
       case '#': {
         int next = peek_source();
-        // FIXME: There are more valid multiline string delimiters than " I
-        //        think. Verify that stuff.
+        // FIXME: There are more valid multiline string delimiters than ".
+        //        Implement support for `#(...#)`, `#{...#}` and `#[...#]`
+        //
+        // See https://pike.lysator.liu.se/generated/manual/modref/ex/cpp_3A_3A/_23_28_23_29.html
         if (next == '"') {
           return lex_multiline_string();
         }
