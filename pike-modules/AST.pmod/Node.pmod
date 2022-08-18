@@ -29,6 +29,10 @@ public class WithModifier {
   public array(Modifier) modifier;
 }
 
+public class WithAttribute {
+  public array(Attribute) attribute;
+}
+
 public class Program {
   inherit Node;
   inherit WithModifier;
@@ -152,7 +156,7 @@ public class Expression {
 }
 
 public class Identifier {
-  inherit Expression;
+  inherit Node;
   public string name;
 
   protected string _sprintf(int t) {
@@ -161,8 +165,7 @@ public class Identifier {
 }
 
 public class StringConstant {
-  inherit Expression;
-
+  inherit Node;
   public string value;
 
   protected string _sprintf(int t) {
@@ -183,6 +186,25 @@ public class TypedIdentifier {
       object_program(this),
       name
     );
+  }
+}
+
+public class TypeReference {
+  inherit Statement;
+}
+
+public class FunctionDeclaration {
+  inherit WithModifier;
+  inherit WithAttribute;
+
+  public Identifier name;
+  public Node body; /* Block statement or Expression */
+  public array(Node) params; /* FIXME: What should a param be? */
+  public bool is_prototype;
+  public IntrinsicType|TypeReference return_type;
+
+  protected string _sprintf(int t) {
+    return sprintf("%O(%O)", object_program(this), name);
   }
 }
 

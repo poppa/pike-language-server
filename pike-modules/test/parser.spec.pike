@@ -37,7 +37,10 @@ describe("Basic parser", lambda () {
   });
 
   test("It should parse identifier with modifiers and basic type", lambda () {
-    PikeParser p = PikeParser(Lexer("public __attribute__(\"test\") int(0..127) constant name;"));
+    PikeParser p = PikeParser(Lexer(
+      "public inline __deprecated__ __attribute__(\"test\") "
+      "int(0..127) get_name();"
+    ));
     Program ast_p = p->parse();
   });
 

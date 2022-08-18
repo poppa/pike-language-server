@@ -169,11 +169,16 @@ public class PikeParser {
           TODO("Curly left after modifier -> recurse\n");
         }
 
-        Node attr, type;
+        array(Node) attr;
+        Node type;
         bool is_const = false;
 
-        if (current_token->type == ATTRIBUTE_ID) {
-          attr = do_attribute();
+        if (is_attribute(current_token)) {
+          attr = ({});
+
+          while (is_attribute(current_token)) {
+            attr += ({ do_attribute() });
+          }
         }
 
         int old_type = current_token->type;
@@ -190,6 +195,50 @@ public class PikeParser {
         // This is either an identifier like a function/method/variable
         // declaration, or the start of a "list" of variable declarations
         expect(IDENTIFIER);
+
+        Token peeked_token = peek_token();
+
+        // Function declaration
+        if (peeked_token->type == PAREN_LEFT) {
+          // FIXME: Move to separate function?
+          Location loc = current_token->location;
+          Node fndecl =
+            make_node(FunctionDeclaration, loc, ([
+              "name": make_node(Identifier, loc, ([
+                "name": current_token->value
+              ])),
+              "attribute": attr,
+              "modifier": mods,
+            ]));
+
+
+          next_token();
+          peeked_token = peek_token();
+
+          if (peeked_token->type != PAREN_RIGHT) {
+            TODO("Parse argument decl list");
+          } else {
+            next_token();
+          }
+
+          accept_next((< SEMICOLON, CURLY_LEFT >));
+
+          if (current_token->type == SEMICOLON) {
+            fndecl->is_prototype = true;
+          } else {
+            TODO("Function body...\n");
+          }
+
+          TODO("Function declaration: %O -> mods: %O, attrs: %O -> next_token: %O\n",
+            fndecl,
+            fndecl->modifier,
+            fndecl->attribute,
+            peeked_token,
+          );
+        } else {
+          // Variable declaration
+          TODO("Handle variable declaration\n");
+        }
 
         TODO("mods: %O, type: %O, is const: %O -> %O\n",
           mods, type, is_const, current_token);
@@ -358,6 +407,7 @@ public class PikeParser {
     return s;
   }
 
+  // FIXME: Separate annotations and modifiers
   protected array(Annotation|Modifier) do_modifiers() {
     array(Annotation) anonlist = do_annotation_list();
     array(Modifier) mods = do_modifier_list();
@@ -429,6 +479,8 @@ public class PikeParser {
       if (peek_token()->type == PAREN_LEFT) {
         next_token();
         accept_next(PAREN_RIGHT);
+      } else {
+        next_token();
       }
 
       return make_node(Attribute, loc, ([ "name": "__deprecated__" ]));
