@@ -88,6 +88,10 @@ public class BaseLexer {
 
   public .Token.Token lex();
 
+  public string `input() {
+    return source[..<3];
+  }
+
   public string `position_info_message() {
     string msg = "";
     if (position_start->byte != cursor) {
