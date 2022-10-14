@@ -539,7 +539,14 @@ class Lexer {
     switch (char) {
       case '\\': {
         TRACE("Current is backslash (\\)\n");
+
         if (lex_state != LEX_STATE_PREPROC_DEFINE) {
+          int next_c = peek_source();
+
+          if ((< '\n', '\r' >)[next_c]) {
+            TODO("Handle line continuation\n");
+          }
+
           SYNTAX_ERROR("Illegal character '%c'\n", char);
         }
 

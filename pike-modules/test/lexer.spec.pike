@@ -811,6 +811,18 @@ describe("Comments", lambda () {
     Token t = l->lex();
     expect(t->value)->to_equal(" This continues     on the next line");
   });
+
+  // test("Proper handle line continuations", lambda () {
+  //   // Lexer l = Lexer("\"continue \
+  //   //   on the next line\"");
+  //   Lexer l = Lexer(Stdio.read_file(
+  //     combine_path(__DIR__, "test-sources", "line-cont.pike")
+  //   ));
+  //   Token t = l->lex();
+  //   werror("-1> %O\n", l->lex());
+  //   werror("-2> %O\n", l->lex());
+  //   expect(t->value)->to_equal("continue ");
+  // });
 });
 
 /*******************************************************************************
@@ -933,7 +945,7 @@ describe("Strings", lambda () {
 
   test("It should throw on unterminated string literal", lambda () {
     string expmsg =
-      "Unterminated string literal\n"
+      "Unterminated string literal (end of input)\n"
       "    at byte range 0..15, column 1..16 on line 1\n";
     expect(lambda() { Lexer("\"Unte\\\"rminated")->lex(); })->to_throw(expmsg);
   });
