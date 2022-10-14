@@ -910,6 +910,27 @@ describe("Strings", lambda () {
     expect(t->value)->to_equal("A simple string");
   });
 
+  test("It should handle escapes", lambda () {
+    Lexer lexer = Lexer(
+      Stdio.File(combine_path(__DIR__, "test-sources", "escaped.pike")),
+      "escaped.pike"
+    );
+
+    Token t = lexer->lex();
+    expect(t->value)->to_equal("\\");
+
+    t = lexer->lex();
+    expect(t->value)->to_equal("\\\\pike");
+
+    t = lexer->lex();
+    expect(t->value)->to_equal("key=\"value\"");
+
+    expect(lambda() { lexer->lex(); })->to_throw(
+      "Newline in string\n"
+      "    at byte range 32..36, column 1..1 on line 4..5\n"
+    );
+  });
+
   test("It should throw on unterminated string literal", lambda () {
     string expmsg =
       "Unterminated string literal\n"

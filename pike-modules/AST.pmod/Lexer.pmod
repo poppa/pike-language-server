@@ -985,12 +985,23 @@ class Lexer {
       int c = consume();
 
       if (c == '\n') {
-        TODO("Handle Newline in string\n");
+        SYNTAX_ERROR("Newline in string\n")
       } else if (c == UNDEFINED) {
-        SYNTAX_ERROR("Unterminated string literal\n");
+        SYNTAX_ERROR("Unterminated string literal (end of input)\n");
       }
 
-      if (c == '"' && prev != '\\') {
+      if (c == '\\') {
+        if (peek_source() == '\\') {
+          c = consume();
+        } else if (peek_source() == '"') {
+          c = consume();
+          add(c);
+          prev = c;
+          continue;
+        }
+      }
+
+      if (c == '"') {
         break;
       }
 
