@@ -80,3 +80,11 @@ npm run test:pike -- -f "lsp.*"
 # in all test files starting with "lsp."
 npm run test:pike -- -f "lsp.*" -t "*callback*"
 ```
+
+## Notes
+
+Run the lexer on the `huge.pike` file:
+
+```
+pike -M pike-modules pike-modules/test/dev.pike
+```
