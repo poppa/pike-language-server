@@ -8,7 +8,8 @@ protected void create(LSP.Server.Base connection) {
   this::connection
     .on("textDocument/didOpen", on_did_open)
     .on("textDocument/didChange", on_did_change)
-    .on("textDocument/didClose", on_did_close);
+    .on("textDocument/didClose", on_did_close)
+    .on("textDocument/didSave", on_did_save);
 }
 
 public array(object(.Document)) `documents() {
@@ -75,4 +76,9 @@ public void on_did_change(mapping message) {
   }
 
   doc->update(td->contentChanges, td->version);
+}
+
+public void on_did_save(mapping message) {
+  object doc = get_document(message);
+  werror("Got on_did_save event for doc: %O\n", doc);
 }
