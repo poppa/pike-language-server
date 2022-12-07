@@ -418,7 +418,7 @@ describe("Magic underscore identifiers", lambda () {
     expect(tok->value)->to_equal("__weak__");
   });
 
-  test("It should lex _Static_assert", lambda () {
+  test("It should lex __weak__", lambda () {
     Token tok = Lexer("__weak__")->lex();
     expect(tok->type)->to_equal(WEAK);
     expect(tok->value)->to_equal("__weak__");
