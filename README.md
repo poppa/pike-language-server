@@ -88,3 +88,9 @@ Run the lexer on the `huge.pike` file:
 ```
 pike -M pike-modules pike-modules/test/dev.pike
 ```
+
+## Dev (note to self)
+
+When running the plugin in dev mode, display the _Output_ panel (**⌘⇧U**) and
+select the _Pike Language Server_ channel to see the `werror` output from the
+Pike LSP server
