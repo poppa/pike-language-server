@@ -425,7 +425,7 @@ describe("Magic underscore identifiers", lambda () {
   });
 
   test(
-    "It should allow user defined dunderscore symbols with non-us-ascii chars",
+    "It should allow user defined dunderscore symbols with uppecase only chars",
     lambda () {
       Token t = Lexer("__OK__")->lex();
       expect(t->type)->to_equal(DUNDERSCORE);
@@ -434,12 +434,15 @@ describe("Magic underscore identifiers", lambda () {
       t = Lexer("__OK_OK2__")->lex();
       expect(t->type)->to_equal(DUNDERSCORE);
       expect(t->value)->to_equal("__OK_OK2__");
+
+      t = Lexer("__OkOk__");
+      expect(lambda() { t->lex(); })->to_throw();
     }
   );
 
   test(
     "It should throw on user defined dunderscore symbol with only "
-    "us-ascii chars",
+    "lowercase chars",
     lambda () {
       Token t = Lexer("__nogood__");
       expect(lambda() { t->lex(); })->to_throw();
