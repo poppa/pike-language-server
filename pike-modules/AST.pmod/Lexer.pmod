@@ -931,8 +931,6 @@ class Lexer {
       current_string = line;
       return make_simple_token(.Token.COMMENT);
     }
-
-    TODO("Return token from lex_line_comment()\n");
   }
 
   private .Token.Token lex_block_comment() {
