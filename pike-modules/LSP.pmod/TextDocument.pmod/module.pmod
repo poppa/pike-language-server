@@ -166,6 +166,11 @@ public class Position
   //!
   //! If a line number is negative, it defaults to 0.
   public int character;
+
+  protected void create(int line, int character) {
+    this::line = line;
+    this::character = character;
+  }
 }
 
 public class Range
@@ -188,6 +193,23 @@ public class Range
 
   //! The range's end position.
   public Position end;
+
+  protected void create(Position start, Position end) {
+    this::start = start;
+    this::end = end;
+  }
+}
+
+public class Location
+//! Represents a location inside a resource, such as a line inside a text file.
+{
+  public DocumentUri uri;
+  public Range range;
+
+  protected void create(DocumentUri uri, Range range) {
+    this::uri = uri;
+    this::range = range;
+  }
 }
 
 public class TextEdit
