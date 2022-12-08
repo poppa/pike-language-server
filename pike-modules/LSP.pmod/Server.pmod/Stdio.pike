@@ -1,3 +1,5 @@
+#include "server.h"
+
 inherit .Base : base;
 
 private Thread.Thread handler_thread;
@@ -20,13 +22,13 @@ public variant void stop() {
 protected void send_response(mapping message, void|JsonRpc.Id id) {
   string encoded_message =
     base::encode_response_message_with_header(message, id);
-  werror("send_response() -> %O\n", encoded_message);
+  DEBUG("send_response() -> %O\n", encoded_message);
   output->write(encoded_message);
 }
 
 protected void send_error(JsonRpc.Error err) {
   string encoded_error = base::encode_response_error_with_header(err);
-  werror("send_error() -> %O\n", encoded_error);
+  DEBUG("send_error() -> %O\n", encoded_error);
   output->write(encoded_error);
 }
 
@@ -39,7 +41,7 @@ protected void start_handler(Stdio.File input, Stdio.File output) {
 
     if (req) {
       if (mixed err = catch(base::handle_request(req))) {
-        werror("An error occured, send error response: %O\n", err);
+        DEBUG("An error occured, send error response: %O\n", err);
         send_error(err);
       }
     } else {

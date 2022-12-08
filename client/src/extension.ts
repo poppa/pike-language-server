@@ -129,7 +129,9 @@ class PikeClient extends LanguageClient {
     const serverModule = context.asAbsolutePath(
       path.join('server', 'main.pike')
     )
+
     const serverModuleOptions = [
+      '-DPLS_LSP_DEBUG',
       '-M',
       context.asAbsolutePath('pike-modules'),
       serverModule,

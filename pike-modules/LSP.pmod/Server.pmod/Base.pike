@@ -1,3 +1,5 @@
+#include "server.h"
+
 inherit LSP.EventEmitter;
 
 //! @url{https://microsoft.github.io/language-server-protocol/specifications/\
@@ -42,7 +44,7 @@ protected string encode_response_error_with_header(JsonRpc.Error err) {
 public void handle_request(.Request request) {
   JsonRpc.Message rpc = request->rpc_message;
 
-  werror("handle_request(%O:%O) -> %O\n", rpc->id, rpc->method, rpc->params);
+  DEBUG("handle_request(%O:%O) -> %O\n", rpc->id, rpc->method, rpc->params);
 
   if (!is_initialized && !(< "initialize", "initialized" >)[rpc->method]) {
     throw(JsonRpc.Error(
@@ -91,11 +93,11 @@ public void on_initialized(mapping params) {
   is_initialized = true;
 
   if (has_configuration_capability) {
-    werror("Client has config capabilities\n");
+    DEBUG("Client has config capabilities\n");
   }
 
   if (has_workspace_folder_capability) {
-    werror("Clients has workspace folder capabilities\n");
+    DEBUG("Clients has workspace folder capabilities\n");
   }
 }
 

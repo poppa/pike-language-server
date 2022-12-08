@@ -1,3 +1,5 @@
+#include "textdocument.h"
+
 inherit LSP.EventEmitter;
 
 private LSP.Server.Base connection;
@@ -66,13 +68,14 @@ protected void on_did_close(mapping params) {
 }
 
 public void on_did_change(mapping message) {
-  werror("Got on change event: %O\n", message);
+  DEBUG("Got on change event: %O\n", message);
 
   mapping td = message->textDocument;
   object doc = get_document(td->uri);
 
   if (!doc) {
-    werror("Document not found!!!\n");
+    DEBUG("Document not found!!!\n");
+    return;
   }
 
   doc->update(td->contentChanges, td->version);
@@ -80,5 +83,5 @@ public void on_did_change(mapping message) {
 
 public void on_did_save(mapping message) {
   object doc = get_document(message);
-  werror("Got on_did_save event for doc: %O\n", doc);
+  DEBUG("Got on_did_save event for doc: %O\n", doc);
 }
