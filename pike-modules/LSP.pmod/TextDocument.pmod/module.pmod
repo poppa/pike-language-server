@@ -150,6 +150,8 @@ public class Position
 //! Positions are line end character agnostic. So you can not specify a position
 //! that denotes `\r|\n` or `\n|` where `|` represents the character offset.
 {
+  inherit LSP.Serializable;
+
   //! Line position in a document (zero-based).
   //! * If a line number is greater than the number of lines in a document, it
   //!   defaults back to the number of lines in the document.
@@ -188,6 +190,8 @@ public class Range
 //! ])
 //! @endcode
 {
+  inherit LSP.Serializable;
+
   //! The range's start position
   public Position start;
 
@@ -203,6 +207,8 @@ public class Range
 public class Location
 //! Represents a location inside a resource, such as a line inside a text file.
 {
+  inherit LSP.Serializable;
+
   public DocumentUri uri;
   public Range range;
 
@@ -215,6 +221,8 @@ public class Location
 public class TextEdit
 //! A text edit applicable to a text document
 {
+  inherit LSP.Serializable;
+
   //! The range of the text document to be manipulated. To insert
   //! text into a document create a range where start == end.
   public Range range;

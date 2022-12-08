@@ -4,6 +4,7 @@ inherit LSP.EventEmitter;
 
 private LSP.Server.Base connection;
 private mapping(.DocumentUri:object(.Document)) _documents = ([]);
+private Pucko.Compiler pucko_compiler;
 
 protected void create(LSP.Server.Base connection) {
   this::connection = connection;
@@ -12,6 +13,8 @@ protected void create(LSP.Server.Base connection) {
     .on("textDocument/didChange", on_did_change)
     .on("textDocument/didClose", on_did_close)
     .on("textDocument/didSave", on_did_save);
+
+  this::pucko_compiler = Pucko.Compiler();
 }
 
 public array(object(.Document)) `documents() {
@@ -67,7 +70,7 @@ protected void on_did_close(mapping params) {
   }
 }
 
-public void on_did_change(mapping message) {
+protected void on_did_change(mapping message) {
   DEBUG("Got on change event: %O\n", message);
 
   mapping td = message->textDocument;
@@ -81,7 +84,101 @@ public void on_did_change(mapping message) {
   doc->update(td->contentChanges, td->version);
 }
 
-public void on_did_save(mapping message) {
-  object doc = get_document(message);
-  DEBUG("Got on_did_save event for doc: %O\n", doc);
+protected void on_did_save(mapping message, JsonRpc.Id id) {
+  .Document doc = get_document(message);
+  DEBUG("Got on_did_save event for doc: %O <> %O : %O\n", doc, message, id);
+
+  array(LSP.Diagnostic.Diagnostic) diagnostics;
+
+  float time = gauge {
+    diagnostics = pucko_compile(doc);
+  };
+
+  if (diagnostics) {
+    DEBUG("Do send Diagnostics\n");
+    send_diagnostics(
+      doc,
+      diagnostics,
+      id
+        // || Standards.UUID.make_version4()->str()
+    );
+  }
+
+  DEBUG("Fugly compilation took: %O\n", time);
+}
+
+protected void send_diagnostics(
+  .Document doc,
+  array(LSP.Diagnostic.Diagnostic) diagnostics,
+  void|JsonRpc.Id message_id)
+{
+  mapping m = LSP.Diagnostic.make_message(doc->uri, diagnostics);
+  DEBUG("Send Diagnostics message: %O\n", m);
+  connection->send_response(m, message_id);
+}
+
+protected array(LSP.Diagnostic.Diagnostic)|void pucko_compile(.Document d) {
+  string uri = d->uri;
+
+  if (has_prefix(uri, "file://")) {
+    uri -= "file://";
+  }
+
+  if (!Stdio.exist(uri)) {
+    return;
+  }
+
+  array|void res = pucko_compiler->compile(uri);
+
+  if (!res) {
+    return;
+  }
+
+  array(LSP.Diagnostic.Diagnostic) diagnostics = ({});
+
+  if (sizeof(res[0]->errors)) {
+    diagnostics += map(
+      res[0]->errors,
+      lambda (mapping m) {
+        return pucko_message_to_diagnostic(
+          d->uri,
+          m,
+          LSP.Diagnostic.SeverityError
+        );
+      }
+    );
+  }
+
+  if (sizeof(res[0]->warnings)) {
+    diagnostics += map(
+      res[0]->warnings,
+      lambda (mapping m) {
+        return pucko_message_to_diagnostic(
+          d->uri,
+          m,
+          LSP.Diagnostic.SeverityWarning
+        );
+      }
+    );
+  }
+
+  if (sizeof(diagnostics)) {
+    return diagnostics - ({ 0 });
+  }
+}
+
+protected LSP.Diagnostic.Diagnostic pucko_message_to_diagnostic(
+  .DocumentUri uri,
+  mapping m,
+  LSP.Diagnostic.Severity severity
+) {
+  DEBUG("Make Diagnostic: %O\n", m);
+  .Position start = .Position(m->line, 1);
+  .Position end = .Position(m->line, 20);
+  .Range range = .Range(start, end);
+
+  LSP.Diagnostic.Diagnostic d = LSP.Diagnostic.Diagnostic(range, m->msg);
+  d->severity = severity;
+
+  return d;
 }

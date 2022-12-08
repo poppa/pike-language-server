@@ -18,7 +18,7 @@ protected void create() {
 
 public void start();
 public void stop();
-protected void send_response(mapping message, void|JsonRpc.Id id);
+public void send_response(mapping message, void|JsonRpc.Id id);
 
 public LSP.TextDocument.Manager `manager() {
   return text_documents;
@@ -53,7 +53,6 @@ public void handle_request(.Request request) {
       rpc,
     ));
   }
-
 
   emit(rpc->method, rpc->params, rpc->id);
 }

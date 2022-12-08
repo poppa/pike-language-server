@@ -36,4 +36,54 @@ test("It should remove the document when receiving a close event", lambda () {
   connection->emit("textDocument/didClose", close_params, 0);
   expect(sizeof(connection->manager->documents))->to_equal(0);
 });
+
+test("Dummy compiler...WIP", lambda () {
+  .Helpers.FakeBaseConnection connection = .Helpers.FakeBaseConnection();
+
+  string uri = "file://" +
+    combine_path(__DIR__, "test-sources", "missing-semi.pike");
+
+  connection->emit(
+    "textDocument/didOpen",
+    ([ /* 1 element */
+      "textDocument": ([ /* 4 elements */
+        "languageId": "pike",
+        "text": "\n"
+          "int age = 12;\n"
+          "string name = \"Pontus\"\n"
+          "array(string) interests = ({});\n",
+        "uri": uri,
+        "version": 1
+      ])
+    ]),
+    0
+  );
+
+  connection->emit(
+    "textDocument/didChange",
+    ([ /* 2 elements */
+      "contentChanges": ({ /* 1 element */
+        ([ /* 3 elements */
+          "range": ([ /* 2 elements */
+              "end": ([ /* 2 elements */
+                  "character": 13,
+                  "line": 1
+                ]),
+              "start": ([ /* 2 elements */
+                  "character": 10,
+                  "line": 1
+                ])
+            ]),
+          "rangeLength": 3,
+          "text": "i"
+        ])
+      }),
+      "textDocument": ([ /* 2 elements */
+          "uri": uri,
+          "version": 2
+        ])
+    ])
+  );
+});
+
 }

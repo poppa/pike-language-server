@@ -35,6 +35,7 @@ public .Request parse_raw_request(Stdio.File input)
     string b = "GET / HTTP/1.0\r\n" + buf->get();
     mapping headers = _Roxen.HeaderParser()->feed(b)[2];
     string data = input->read((int)headers["content-length"]);
+    werror("***** %s\n*************\n", data);
     return .Request(headers, data);
   }
 

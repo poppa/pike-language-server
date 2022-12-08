@@ -7,16 +7,16 @@ public enum Severity
 // The diagnostic severity
 {
   //! Reports an error
-  Error = 1,
+  SeverityError = 1,
 
   //! Reports a warning
-  Warning,
+  SeverityWarning,
 
   //! Reports an information
-  Information,
+  SeverityInformation,
 
   //! Reports a hint
-  Hint,
+  SeverityHint,
 }
 
 public enum Tag {
@@ -24,18 +24,28 @@ public enum Tag {
 	//!
 	//! Clients are allowed to render diagnostics with this tag faded out
 	//! instead of having an error squiggle.
-  Unnecessary = 1,
+  TagUnnecessary = 1,
 
   //! Deprecated or obsolete code.
 	//!
 	//! Clients are allowed to rendered diagnostics with this tag strike through.
-  Deprecated,
+  TagDeprecated,
+}
+
+
+public mapping make_message(DocumentUri uri, array(Diagnostic) diagnostics) {
+  return ([
+    "uri": uri,
+    "diagnostics": (array(mapping)) diagnostics,
+  ]);
 }
 
 public class Diagnostic
 //! Represents a diagnostic, such as a compiler error or warning.
 //! Diagnostic objects are only valid in the scope of a resource.
 {
+  inherit LSP.Serializable;
+
   //! The range at which the message applies.
   public Range range;
 
@@ -54,7 +64,7 @@ public class Diagnostic
 
   //! A human-readable string describing the source of this diagnostic, e.g.
   //! 'typescript' or 'super lint'.
-  public OPTIONAL(string) source;
+  public OPTIONAL(string) source = "pike";
 
   //! Additional metadata about the diagnostic.
   public OPTIONAL(Tag) tags;
@@ -77,6 +87,8 @@ public class Diagnostic
 public class CodeDescription
 //! Structure to capture a description for an error code.
 {
+  inherit LSP.Serializable;
+
   //! An URI to open with more information about the diagnostic error.
   public DocumentUri uri;
 }
@@ -86,6 +98,8 @@ public class RelatedInformation
 //! This should be used to point to code locations that cause or are related to
 //! a diagnostics, e.g when duplicating a symbol in a scope.
 {
+  inherit LSP.Serializable;
+
   //! The location of this related diagnostic information.
   public Location location;
 

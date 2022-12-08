@@ -67,6 +67,8 @@ export function activate(context: ExtensionContext) {
       let client = new PikeClient(context, config)
       client.start()
       clients.set(folder.uri.toString(), client)
+
+      context.subscriptions.push(client)
     } else {
       console.log(`Workspace alread has client`)
     }
@@ -185,6 +187,13 @@ class PikeClient extends LanguageClient {
       `This Init Options After Super call: %O`,
       this.clientOptions.initializationOptions
     )
+  }
+
+  public async dispose(): Promise<void> {
+    console.log(`** Got dispose in client`)
+    if (this.isRunning()) {
+      await this.stop()
+    }
   }
 }
 
