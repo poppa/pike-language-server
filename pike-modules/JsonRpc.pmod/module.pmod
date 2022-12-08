@@ -36,8 +36,8 @@ protected mapping(error_code:string) error_messages = ([
   INTERNAL_ERROR: "Internal JSON-RPC error.",
 ]);
 
-public class JsonRpcError {
-  inherit Error.Generic;
+public class Error {
+  inherit __builtin.GenericError;
 
   protected int _code;
   protected Message _request_message;
@@ -167,7 +167,7 @@ public ResponseMessage make_response_message(ResultType res, void|Id id) {
 }
 
 public ResponseErrorMessage make_response_error(
-  JsonRpcError err,
+  Error err,
   void|ErrorData data,
   void|Id id
 ) {
@@ -241,7 +241,7 @@ public bool is_valid_request(RequestMessage|mapping message) {
 
 public RequestMessage|NotificationMessage request_to_instance(mapping message) {
   if (!is_valid_request(message)) {
-    throw(JsonRpcError(INVALID_REQUEST));
+    throw(Error(INVALID_REQUEST));
   }
 
   if (undefinedp(message->id)) {

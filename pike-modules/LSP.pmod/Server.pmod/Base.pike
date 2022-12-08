@@ -32,7 +32,7 @@ protected string encode_response_message_with_header(
   return sprintf("Content-Length: %d\r\n\r\n%s", sizeof(data), data);
 }
 
-protected string encode_response_error_with_header(JsonRpc.JsonRpcError err) {
+protected string encode_response_error_with_header(JsonRpc.Error err) {
   string data = Standards.JSON.encode(
     (mapping)JsonRpc.make_response_error(err)
   );
@@ -45,7 +45,7 @@ public void handle_request(.Request request) {
   werror("handle_request(%O:%O) -> %O\n", rpc->id, rpc->method, rpc->params);
 
   if (!is_initialized && !(< "initialize", "initialized" >)[rpc->method]) {
-    throw(JsonRpc.JsonRpcError(
+    throw(JsonRpc.Error(
       .ERR_SERVER_NOT_INITIALIZED,
       "Received request before initialize",
       rpc,

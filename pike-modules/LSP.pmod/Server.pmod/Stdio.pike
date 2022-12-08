@@ -9,7 +9,7 @@ public void start() {
 }
 
 public void stop(int code) {
-  handler_thread && handler_thread->kill();
+  handler_thread?->kill();
   exit(code);
 }
 
@@ -24,7 +24,7 @@ protected void send_response(mapping message, void|JsonRpc.Id id) {
   output->write(encoded_message);
 }
 
-protected void send_error(JsonRpc.JsonRpcError err) {
+protected void send_error(JsonRpc.Error err) {
   string encoded_error = base::encode_response_error_with_header(err);
   werror("send_error() -> %O\n", encoded_error);
   output->write(encoded_error);

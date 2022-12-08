@@ -170,7 +170,7 @@ int main() {
   });
 
   test("make_response_error should do its thing", lambda () {
-    object err = JsonRpc.JsonRpcError(JsonRpc.PARSE_ERROR);
+    object err = JsonRpc.Error(JsonRpc.PARSE_ERROR);
     object x = make_response_error(err);
     expect(object_program(x))->to_be(JsonRpc.ResponseErrorMessage);
     expect(mappingp(x->error))->to_equal(true);
@@ -181,7 +181,7 @@ int main() {
   test(
     "make_response_error with id and data params should do its thing",
     lambda () {
-      object err = JsonRpc.JsonRpcError(JsonRpc.PARSE_ERROR);
+      object err = JsonRpc.Error(JsonRpc.PARSE_ERROR);
       object x = make_response_error(err, ({ "one", 1 }), 12);
       expect(object_program(x))->to_be(JsonRpc.ResponseErrorMessage);
       expect(mappingp(x->error))->to_equal(true);
