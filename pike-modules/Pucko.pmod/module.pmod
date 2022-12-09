@@ -48,7 +48,10 @@ public class Compiler {
       if (sscanf(line, "%s:%d:(%1s)%s", fname, ln, type, msg) == 4) {
         entry = ([
           "file": fname,
-          "line": ln,
+          // FIXME: Move this subtraction to the consumer instead? The LSP
+          //        diagnostics used zero based line numbers, which the info
+          //        from Pike isn't
+          "line": ln - 1,
           "msg": msg,
         ]);
 
