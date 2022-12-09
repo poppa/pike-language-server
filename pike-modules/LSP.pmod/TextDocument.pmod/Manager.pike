@@ -99,8 +99,8 @@ protected void on_did_save(mapping message, JsonRpc.Id id) {
     send_diagnostics(
       doc,
       diagnostics,
-      id
-        // || Standards.UUID.make_version4()->str()
+      // FIXME: I dunno why we don't get any ID in the requests.
+      id || doc->uri
     );
   }
 
