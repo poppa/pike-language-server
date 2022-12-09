@@ -46,7 +46,13 @@
           "description": "Traces the communication between VS Code and the language server."
         }
       }
-    }
+    },
+    "snippets": [
+      {
+        "language": "pike",
+        "path": "snippets/pike.json"
+      }
+    ]
   },
   "scripts": {
     "init": "npm ci && npm run git:init:pest",

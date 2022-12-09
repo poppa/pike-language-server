@@ -1,0 +1,8 @@
+{
+  "Pike function": {
+    "scope": "pike",
+    "prefix": "fn",
+    "body": ["${1:private} ${2:type} ${3:name}(${4:...args}) {", "  $5", "}"],
+    "description": "Pike function"
+  }
+}
