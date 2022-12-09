@@ -20,12 +20,13 @@
         "extensions": [
           ".pike",
           ".pmod"
-        ]
+        ],
+        "configuration": "./language-configuration.json"
       }
     ],
     "configuration": {
       "type": "object",
-      "title": "Pike configuration",
+      "title": "Pike Configuration",
       "properties": {
         "pikeLangServer.maxNumberOfProblems": {
           "scope": "resource",
