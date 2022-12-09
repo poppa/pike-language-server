@@ -28,13 +28,13 @@
       "type": "object",
       "title": "Pike Configuration",
       "properties": {
-        "pikeLangServer.maxNumberOfProblems": {
+        "pikeLanguageServer.maxNumberOfProblems": {
           "scope": "resource",
           "type": "number",
           "default": 100,
           "description": "Controls the maximum number of problems produced by the server."
         },
-        "pikeLangServer.trace.server": {
+        "pikeLanguageServer.trace.server": {
           "scope": "window",
           "type": "string",
           "enum": [
@@ -44,6 +44,24 @@
           ],
           "default": "off",
           "description": "Traces the communication between VS Code and the language server."
+        },
+        "pikeLanguageServer.compiler.path": {
+          "scope": "resource",
+          "type": "string",
+          "default": "pike",
+          "description": "Path to the Pike executable"
+        },
+        "pikeLanguageServer.runtime.includePaths": {
+          "scope": "resource",
+          "type": "array",
+          "default": [],
+          "description": "Additional include paths"
+        },
+        "pikeLanguageServer.runtime.modulePaths": {
+          "scope": "resource",
+          "type": "array",
+          "default": [],
+          "description": "Additional module paths"
         }
       }
     },

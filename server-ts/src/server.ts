@@ -53,57 +53,66 @@ connection.onInitialize((params) => {
 })
 
 connection.onInitialized(() => {
-  console.log(`Were initialized...`)
   if (hasConfigurationCapability) {
-    console.log(`...And has config capabilities`)
     // Register for all configuration changes.
     connection.client.register(
       DidChangeConfigurationNotification.type,
       undefined
     )
-  } else {
-    console.log(`...Without config capabilities`)
   }
 
   if (hasWorkspaceFolderCapability) {
-    console.log(`...And with Workspace Folder Capabilities`)
     connection.workspace.onDidChangeWorkspaceFolders((_event) => {
-      connection.console.log('Workspace folder change event received.')
+      // console.log('Workspace folder change event received:', _event)
+      // connection.console.log('Workspace folder change event in Server')
     })
-  } else {
-    console.log(`...Without Workspace Folder Capabilities`)
   }
 })
 
-// The example settings
-interface ExampleSettings {
+// FIXME: Move this to a shareable package
+interface PikeSettings {
   maxNumberOfProblems: number
+  trace: {
+    server: boolean
+  }
+  compiler: {
+    path: string
+  }
+  runtime: {
+    includePaths?: string[]
+    modulePaths?: string[]
+  }
 }
 
 // The global settings, used when the `workspace/configuration` request is not supported by the client.
 // Please note that this is not the case when using this server with the client provided in this example
 // but could happen with other clients.
-const defaultSettings: ExampleSettings = { maxNumberOfProblems: 1000 }
-let globalSettings: ExampleSettings = defaultSettings
-
+const defaultSettings: PikeSettings = {
+  maxNumberOfProblems: 100,
+  trace: { server: false },
+  compiler: { path: 'pike' },
+  runtime: {},
+}
+let globalSettings: PikeSettings = defaultSettings
 // Cache the settings of all open documents
-const documentSettings: Map<string, Thenable<ExampleSettings>> = new Map()
+const documentSettings: Map<string, Thenable<PikeSettings>> = new Map()
 
 connection.onDidChangeConfiguration((change) => {
+  console.log(`Got Config Change: %o`, change)
+
   if (hasConfigurationCapability) {
     // Reset all cached document settings
     documentSettings.clear()
   } else {
-    globalSettings = <ExampleSettings>(
-      (change.settings.languageServerExample || defaultSettings)
-    )
+    globalSettings = (change.settings.pikeLanguageServer ||
+      defaultSettings) as PikeSettings
   }
 
   // Revalidate all open text documents
   documents.all().forEach(validateTextDocument)
 })
 
-function getDocumentSettings(resource: string): Thenable<ExampleSettings> {
+function getDocumentSettings(resource: string): Thenable<PikeSettings> {
   if (!hasConfigurationCapability) {
     return Promise.resolve(globalSettings)
   }
@@ -113,7 +122,7 @@ function getDocumentSettings(resource: string): Thenable<ExampleSettings> {
   if (!result) {
     result = connection.workspace.getConfiguration({
       scopeUri: resource,
-      section: 'pikeLangServer',
+      section: 'pikeLanguageServer',
     })
 
     documentSettings.set(resource, result)
@@ -154,16 +163,7 @@ async function validateTextDocument(textDocument: TextDocument): Promise<void> {
   console.log(`Validate Text Document ... %o`, textDocument)
 
   // // In this simple example we get the settings for every validate run.
-  // const settings = await getDocumentSettings(textDocument.uri)
-
-  // // The validator creates diagnostics for all uppercase words length 2 and more
-  // const text = textDocument.getText()
-  // const pattern = /\b[A-Z]{2,}\b/g
-  // let m: RegExpExecArray | null
-
-  // let problems = 0
-
-  console.log(`CWD:`, process.cwd())
+  const settings = await getDocumentSettings(textDocument.uri)
 
   const path = textDocument.uri.replace('file://', '')
 
@@ -175,7 +175,41 @@ async function validateTextDocument(textDocument: TextDocument): Promise<void> {
       path,
     ]
 
-    const spawner = spawn('pike', args)
+    const pikeEnv = {
+      ...process.env,
+    }
+
+    if (settings.runtime.includePaths) {
+      let incPaths: string[] = []
+
+      if (process.env.PIKE_INCLUDE_PATH) {
+        incPaths = [process.env.PIKE_INCLUDE_PATH]
+      }
+
+      pikeEnv.PIKE_INCLUDE_PATH = [
+        ...incPaths,
+        ...settings.runtime.includePaths,
+      ].join(':')
+    }
+
+    if (settings.runtime.modulePaths) {
+      let modPaths: string[] = []
+
+      if (process.env.PIKE_MODULE_PATH) {
+        modPaths = [process.env.PIKE_MODULE_PATH]
+
+        if (modPaths[0].endsWith(':')) {
+          modPaths[0] = modPaths[0].substring(0, modPaths[0].length - 1)
+        }
+      }
+
+      pikeEnv.PIKE_MODULE_PATH = [
+        ...modPaths,
+        ...settings.runtime.modulePaths,
+      ].join(':')
+    }
+
+    const spawner = spawn('pike', args, { env: pikeEnv })
 
     const cid = setTimeout(() => {
       spawner.kill(9)
@@ -202,6 +236,13 @@ async function validateTextDocument(textDocument: TextDocument): Promise<void> {
         clearTimeout(cid)
 
         if (code === 0) {
+          if (errBuffer.length) {
+            console.log(
+              `Spawn pike wrote to stderr: %s`,
+              errBuffer.map((b) => b.toString('utf-8')).join('')
+            )
+          }
+
           resolve(outBuffer.map((b) => b.toString('utf-8')).join(''))
         } else {
           resolve(new Error(errBuffer.map((b) => b.toString('utf-8')).join('')))
