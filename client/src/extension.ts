@@ -1,4 +1,5 @@
 import * as path from 'path'
+import { Context } from 'vm'
 import {
   ExtensionContext,
   TextDocument,
@@ -17,6 +18,9 @@ import { PikeClientConfig } from './config'
 let defaultClient: LanguageClient
 let clients = new Map<string, LanguageClient>()
 let _sortedWorkspaceFolders: string[] | undefined
+
+// This is pretty much only for dev purposes
+const RunMode: 'pike' | 'ts' = 'ts'
 
 function isPikeDocument(document: TextDocument): boolean {
   return document.languageId === 'pike'
@@ -43,7 +47,6 @@ export function activate(context: ExtensionContext) {
 
     // Untitled files go to a default client.
     if (!folder || uri.scheme === 'untitled') {
-      console.log(`Untitled or no Folder`)
       if (!defaultClient) {
         console.log(
           `create default client: Workspace conf: %O`,
@@ -80,7 +83,6 @@ export function activate(context: ExtensionContext) {
     for (let folder of event.removed) {
       let client = clients.get(folder.uri.toString())
       if (client) {
-        console.log(`Remove client: %O\n`, client)
         clients.delete(folder.uri.toString())
         client.stop()
       }
@@ -113,11 +115,14 @@ workspace.onDidChangeWorkspaceFolders(
 
 function getOuterMostWorkspaceFolder(folder: WorkspaceFolder): WorkspaceFolder {
   let sorted = sortedWorkspaceFolders()
+
   for (let element of sorted) {
     let uri = folder.uri.toString()
+
     if (uri.charAt(uri.length - 1) !== '/') {
       uri = uri + '/'
     }
+
     if (uri.startsWith(element)) {
       return workspace.getWorkspaceFolder(Uri.parse(element))!
     }
@@ -126,44 +131,77 @@ function getOuterMostWorkspaceFolder(folder: WorkspaceFolder): WorkspaceFolder {
   return folder
 }
 
-class PikeClient extends LanguageClient {
-  public constructor(context: ExtensionContext, config: PikeClientConfig) {
-    const serverModule = context.asAbsolutePath(
-      path.join('server', 'main.pike')
-    )
+function constructTypescriptServerOptions(context: Context): ServerOptions {
+  const serverModule = context.asAbsolutePath(
+    path.join('server-ts', 'out', 'server.js')
+  )
 
-    const serverModuleOptions = [
-      '-DPLS_LSP_DEBUG',
-      '-M',
-      context.asAbsolutePath('pike-modules'),
-      serverModule,
-    ]
-
-    // If the extension is launched in debug mode then the debug server options
-    // are used, otherwise the run options are used
-    const serverOptions: ServerOptions = {
-      run: {
-        command: 'pike',
-        args: serverModuleOptions,
-        transport: TransportKind.stdio,
-      },
-      debug: {
-        command: 'pike',
-        args: serverModuleOptions,
-        transport: TransportKind.stdio,
-        // NOTE! Pike doesn't support the inspect stuff below yet. Keeping it
-        //       as reference
-        // --inspect=6009: runs the server in Node's Inspector mode so VS Code
-        // can attach to the server for debugging
-        options: {
-          execArgv: ['--nolazy', '--inspect=6009'],
-          env: {
-            ...process.env,
-            LSP_DEBUG: '1',
-          },
+  const serverOptions: ServerOptions = {
+    run: {
+      module: serverModule,
+      transport: TransportKind.ipc,
+    },
+    debug: {
+      module: serverModule,
+      transport: TransportKind.ipc,
+      options: {
+        execArgv: ['--nolazy', '--inspect=6009'],
+        env: {
+          ...process.env,
+          LSP_DEBUG: '1',
         },
       },
-    }
+    },
+  }
+
+  return serverOptions
+}
+
+function constructPikeNativeServerOptions(context: Context): ServerOptions {
+  const serverModule = context.asAbsolutePath(path.join('server', 'main.pike'))
+
+  const serverModuleOptions = [
+    '-DPLS_LSP_DEBUG',
+    '-M',
+    context.asAbsolutePath('pike-modules'),
+    serverModule,
+  ]
+
+  // If the extension is launched in debug mode then the debug server options
+  // are used, otherwise the run options are used
+  const serverOptions: ServerOptions = {
+    run: {
+      command: 'pike',
+      args: serverModuleOptions,
+      transport: TransportKind.stdio,
+    },
+    debug: {
+      command: 'pike',
+      args: serverModuleOptions,
+      transport: TransportKind.stdio,
+      // NOTE! Pike doesn't support the inspect stuff below yet. Keeping it
+      //       as reference
+      // --inspect=6009: runs the server in Node's Inspector mode so VS Code
+      // can attach to the server for debugging
+      options: {
+        execArgv: ['--nolazy', '--inspect=6009'],
+        env: {
+          ...process.env,
+          LSP_DEBUG: '1',
+        },
+      },
+    },
+  }
+
+  return serverOptions
+}
+
+class PikeClient extends LanguageClient {
+  public constructor(context: ExtensionContext, config: PikeClientConfig) {
+    const serverOptions =
+      RunMode === 'ts'
+        ? constructTypescriptServerOptions(context)
+        : constructPikeNativeServerOptions(context)
 
     const clientOptions: LanguageClientOptions = {
       documentSelector: [{ scheme: 'file', language: 'pike' }],
