@@ -1396,6 +1396,11 @@ describe("Symbol names", lambda () {
       ->to_equal(([ "byte": 5, "column": 6, "line": 1 ]));
     t = Lexer("`[]=(){}")->lex();
     expect(t->value)->to_equal("`[]=");
+
+    l = Lexer("(`!)");
+    t = l->lex();
+    t = l->lex();
+    expect(t->value)->to_equal("`!");
   });
 
   test("It should lex user defined getters and setters", lambda () {

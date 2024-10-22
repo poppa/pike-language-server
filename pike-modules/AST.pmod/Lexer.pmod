@@ -1096,7 +1096,7 @@ class Lexer {
     }
 
     #define ASSERT_VALID_NEXT() do {                                          \
-      if (!(< ' ', '\t', '\v', '\n', '(', ',', ';' >)[peek_source()]) {       \
+      if (!(< ' ', '\t', '\v', '\n', '(', ')', ',', ';' >)[peek_source()]) {  \
         SYNTAX_ERROR("Illegal ` identifier. Expected %s", current_string);    \
       }                                                                       \
     } while (0)
